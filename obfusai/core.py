@@ -39,6 +39,7 @@ from typing import (
 )
 
 from . import anchor as _anchor
+from . import detectors as _pii
 from .anchor import DECOY_VALUE as _DECOY_VALUE
 
 __all__ = [
@@ -70,7 +71,7 @@ _PROTECTED_RE: Pattern[str] = re.compile(
 _NUMBER_RE: Pattern[str] = re.compile(
     r"(?<![\w.])"
     r"[$€£¥]?"
-    r"\d[\d,]*(?:\.\d+)?"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"  # 1,234,567 / 42 / 0.73 (never a trailing comma)
     r"(?:%|\s?(?:bps|bp|ms|MB|GB|TB|USD|EUR|GBP|[kKMBx])(?![\w]))?"
     r"(?!\.\d)(?![\w])"  # not the head of "10.0.0.7" or "1.2.3"
 )
@@ -124,6 +125,8 @@ _DETECTOR_PATTERNS: Dict[str, Tuple[Tuple[Pattern[str], bool], ...]] = {
     "emails": ((_EMAIL_RE, False),),
     "urls": ((_URL_RE, False),),
     "ips": ((_IP_RE, False),),
+    # specific, checksum-validated formats come before the generic "numbers" so they win ties
+    **{name: _pii.PATTERNS[name] for name in ("secrets", "uuids", "cards", "ssn", "cn_ids", "cn_phones", "ibans", "phones")},
     "numbers": ((_NUMBER_RE, False),),
     "phrases": ((_TITLE_PHRASE_RE, False),),
     "acronyms": ((_ACRONYM_RE, False),),
@@ -255,6 +258,7 @@ class _Span:
     start: int
     end: int
     value: str
+    detector: str = ""
 
 
 def _join_anchor(text: str, anchor: str, position: str) -> str:
@@ -697,7 +701,7 @@ class ObfusAIComponent:
             value = text[start:end]
             if not self._worth_replacing(text, start, end, value, detector, profile):
                 continue
-            spans.append(_Span(start, end, value))
+            spans.append(_Span(start, end, value, detector))
             last_end = end
         return spans
 
@@ -705,6 +709,9 @@ class ObfusAIComponent:
     def _worth_replacing(
         text: str, start: int, end: int, value: str, detector: str, profile: _Profile
     ) -> bool:
+        validator = _pii.VALIDATORS.get(detector)
+        if validator is not None and not validator(value):
+            return False
         if detector == "numbers":
             if len(value) == 1 and value.isdigit():
                 return False

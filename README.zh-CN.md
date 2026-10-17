@@ -160,6 +160,35 @@ ObfusAIComponent(
 )
 ```
 
+### 个人信息与凭证
+
+可选的检测器，带校验位验证（过不了 Luhn 校验的 16 位数字*不会*被当成银行卡）：
+
+| 检测器 | 匹配内容 |
+|---|---|
+| `phones` | 带 `+`、括号、连字符或点号的国际/国内号码 |
+| `cn_phones` | 中国大陆手机号（`1[3-9]xxxxxxxxx`，可带 `+86`） |
+| `cards` | 银行卡（Luhn）· `ssn` 美国社保号 · `cn_ids` 18 位居民身份证（校验位+出生日期）· `ibans`（mod-97） |
+| `uuids` · `secrets` | UUID · AWS/GitHub/Slack/Google/`sk-…` 密钥、JWT、私钥块 |
+
+```python
+ObfusAIComponent("medium", extra_detectors=["phones", "cards", "cn_ids", "uuids"])
+```
+
+> 锚点里仍然带着每一个被隐藏的值，所以**凭证应当直接从提示词里删除，而不是混淆。** 用审计功能把它们找出来：
+
+```python
+from obfusai import audit
+
+report = audit(system_prompt)          # 默认检测邮箱、IP、密钥与个人信息
+if not report.clean:
+    print(report.counts)               # {"secrets": 1, "emails": 2}
+    for f in report.findings:          # 检测器、起止位置和*脱敏后*的预览（绝不输出原值）
+        print(f.detector, f.start, f.end, f.preview)
+```
+
+命令行 `obfusai audit prompt.txt` 效果相同（发现问题时退出码为 1）。检测基于启发式规则：它能降低把敏感数据发出去的概率，但不能证明提示词是干净的。
+
 ### 按字段的策略
 
 请求的不同部分值得区别对待：系统提示词里的专有数字要隐藏，而如果你的模型在工具描述可读时选工具更准，就让工具描述保持原样。
@@ -214,6 +243,7 @@ report.acceptable("high")   # 通过率不低于明文基线，且没有泄露�
 obfusai obfuscate prompt.txt -l high --seed s --lang zh --mapping-out map.json > protected.txt
 obfusai restore reply.txt -m map.json
 obfusai scan reply.txt -m map.json        # 回复存在泄露时退出码为 1
+obfusai audit prompt.txt                  # 提示词含密钥/个人信息时退出码为 1
 ```
 
 ## 工作原理
@@ -247,7 +277,7 @@ flowchart LR
 
 ## 路线图
 
-更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
+`messages.stream()` 的原始事件迭代还原。
 
 ## 开发
 

@@ -1,4 +1,4 @@
-"""Command-line interface: ``obfusai obfuscate | restore | scan`` (also ``python -m obfusai``)."""
+"""Command-line interface: ``obfusai obfuscate | restore | scan | audit`` (also ``python -m obfusai``)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import List, Optional, Sequence, TextIO
 
 from . import __version__
 from .anchor import LANGUAGES, STYLES
+from .audit import audit
 from .core import DETECTORS, ObfusAIComponent
 from .guard import LeakDetector
 
@@ -59,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("file", nargs="?", default="-")
     scan.add_argument("-m", "--mapping", metavar="FILE", help="alias table to also look for")
     scan.add_argument("--no-values", action="store_true", help="ignore original values in the output")
+
+    aud = sub.add_parser("audit", help="find personal data and credentials in a prompt (exit 1 if found)")
+    aud.add_argument("file", nargs="?", default="-")
+    aud.add_argument("-d", "--detector", action="append", default=[], choices=DETECTORS,
+                     help="detector to run (repeatable; default: emails, ips, secrets and personal-data detectors)")
     return parser
 
 
@@ -98,6 +104,12 @@ def main(argv: Optional[Sequence[str]] = None, stdin: Optional[TextIO] = None, s
         if args.command == "restore":
             stdout.write(ObfusAIComponent.deobfuscate(_read(args.file, stdin), _load_mapping(args.mapping)))
             return 0
+        if args.command == "audit":
+            found = audit(_read(args.file, stdin), args.detector or None)
+            for finding in found.findings:
+                stdout.write(f"{finding.detector}\t{finding.start}-{finding.end}\t{finding.preview}\n")
+            stdout.write("clean\n" if found.clean else f"SENSITIVE VALUES FOUND: {found.counts}\n")
+            return 0 if found.clean else 1
         mapping = _load_mapping(args.mapping) if args.mapping else {}
         report = LeakDetector(mapping, check_values=not args.no_values).scan(_read(args.file, stdin))
         for finding in report.findings:

@@ -159,6 +159,35 @@ ObfusAIComponent(
 )
 ```
 
+### Personal data & credentials
+
+Opt-in detectors with checksum validation (a 16-digit number that fails Luhn is *not* a card):
+
+| Detector | Matches |
+|---|---|
+| `phones` | international / national numbers written with `+`, parentheses, hyphens or dots |
+| `cn_phones` | mainland-China mobile numbers (`1[3-9]xxxxxxxxx`, optional `+86`) |
+| `cards` | payment cards (Luhn) · `ssn` US SSNs · `cn_ids` 18-digit resident IDs (checksum + date) · `ibans` (mod-97) |
+| `uuids` · `secrets` | UUIDs · AWS/GitHub/Slack/Google/`sk-…` keys, JWTs, private-key blocks |
+
+```python
+ObfusAIComponent("medium", extra_detectors=["phones", "cards", "cn_ids", "uuids"])
+```
+
+> The anchor still carries every hidden value, so **remove credentials from prompts instead of obfuscating them.** Use the audit to find them:
+
+```python
+from obfusai import audit
+
+report = audit(system_prompt)          # emails, IPs, secrets and personal data by default
+if not report.clean:
+    print(report.counts)               # {"secrets": 1, "emails": 2}
+    for f in report.findings:          # detector, start, end and a *masked* preview (never the value)
+        print(f.detector, f.start, f.end, f.preview)
+```
+
+`obfusai audit prompt.txt` does the same from the shell (exit code 1 when something is found). Detection is heuristic: it lowers the chance of shipping sensitive data, it does not prove a prompt is clean.
+
 ### Per-field policies
 
 Different parts of a request deserve different treatment: hide proprietary numbers in the system prompt, but leave tool descriptions readable if your model picks tools more reliably that way.
@@ -213,6 +242,7 @@ report.acceptable("high")   # same pass rate as plaintext and no leaks?
 obfusai obfuscate prompt.txt -l high --seed s --lang zh --mapping-out map.json > protected.txt
 obfusai restore reply.txt -m map.json
 obfusai scan reply.txt -m map.json        # exit code 1 if the reply leaks
+obfusai audit prompt.txt                  # exit code 1 if the prompt contains secrets / personal data
 ```
 
 ## How it works
@@ -246,7 +276,7 @@ flowchart LR
 
 ## Roadmap
 
-richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
+Anthropic raw-event iteration from `messages.stream()`.
 
 ## Development
 

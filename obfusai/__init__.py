@@ -10,9 +10,10 @@ from .core import (
     ObfuscationSession,
     ObfuscationStats,
 )
+from .audit import AuditFinding, AuditReport, audit
 from .guard import LeakDetector, LeakReport, StreamRestorer
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "ObfusAIComponent",
@@ -23,6 +24,9 @@ __all__ = [
     "ObfuscatedPayload",
     "ObfuscationSession",
     "ObfuscationStats",
+    "audit",
+    "AuditFinding",
+    "AuditReport",
     "LeakDetector",
     "LeakReport",
     "StreamRestorer",
