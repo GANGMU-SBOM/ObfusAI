@@ -18,9 +18,11 @@ Streaming is decoded too:
 * ``messages.create(stream=True)`` returns the raw event stream with every
   ``text_delta`` decoded (aliases split across events included).
 * ``with client.messages.stream(...) as stream`` returns a stream whose
-  ``text_stream``, ``get_final_message()`` and ``get_final_text()`` are decoded.
-  Iterating raw events from this helper is not supported (use ``text_stream`` or
-  ``create(stream=True)``); ``current_message_snapshot`` stays undecoded.
+  ``text_stream``, ``get_final_message()``, ``get_final_text()`` and event iteration
+  (``for event in stream``: raw, ``text`` and ``content_block_stop`` events) are decoded.
+  Use one consumer per stream: the SDK's ``text_stream`` and event iteration share a
+  single underlying iterator.  ``current_message_snapshot`` is decoded per content
+  block once that block has stopped; while a block is still streaming it holds aliases.
 
 Protected entry points are ``messages.create`` and ``messages.stream``.  Other
 ``messages`` methods are blocked, except ``count_tokens``, so a prompt can never
@@ -36,7 +38,13 @@ from typing import Any, AsyncIterator, Iterator, Mapping, Optional
 from ..core import ObfusAIComponent
 from ..guard import StreamRestorer
 from ._common import protect_kwargs
-from ._streams import AnthropicEventRestorer, arestore_events, restore_events, restore_message_content
+from ._streams import (
+    AnthropicEventRestorer,
+    MessageStreamEventRestorer,
+    arestore_events,
+    restore_events,
+    restore_message_content,
+)
 
 __all__ = ["ObfusAIAnthropic"]
 
@@ -137,14 +145,10 @@ class _RestoredMessageStream:
         return ObfusAIComponent.deobfuscate(await awaited, self._mapping)
 
     def __iter__(self) -> Iterator[Any]:
-        raise NotImplementedError(
-            "iterate text_stream (decoded) or use messages.create(stream=True) for decoded raw events"
-        )
+        return restore_events(self._inner, MessageStreamEventRestorer(self._mapping))
 
     def __aiter__(self) -> AsyncIterator[Any]:
-        raise NotImplementedError(
-            "iterate text_stream (decoded) or use messages.create(stream=True) for decoded raw events"
-        )
+        return arestore_events(self._inner, MessageStreamEventRestorer(self._mapping))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

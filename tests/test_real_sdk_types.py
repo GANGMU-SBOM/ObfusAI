@@ -33,3 +33,42 @@ def test_responses_real_event_types() -> None:
     out = list(restore_events(events, ResponsesEventRestorer(MAPPING)))
     assert "".join(e.delta for e in out if e.type == "response.output_text.delta") == "see alpha_x"
     assert out[-1].text == "see alpha_x"
+
+
+def test_anthropic_message_stream_helper_iteration_is_decoded() -> None:
+    """Drive the real SDK MessageStream (event building, snapshots) through our wrapper."""
+    anthropic = pytest.importorskip("anthropic")
+    from anthropic.lib.streaming import MessageStream
+    from anthropic.types import (
+        Message, MessageDeltaUsage, RawContentBlockDeltaEvent, RawContentBlockStartEvent,
+        RawContentBlockStopEvent, RawMessageDeltaEvent, RawMessageStartEvent, RawMessageStopEvent,
+        TextBlock, TextDelta, Usage,
+    )
+    from anthropic.types.raw_message_delta_event import Delta
+
+    from obfusai.adapters.anthropic import _RestoredMessageStream
+
+    message = Message(id="m", type="message", role="assistant", model="c", content=[], stop_reason=None,
+                      stop_sequence=None, usage=Usage(input_tokens=1, output_tokens=1))
+    events = [RawMessageStartEvent(type="message_start", message=message),
+              RawContentBlockStartEvent(type="content_block_start", index=0, content_block=TextBlock(type="text", text="", citations=None))]
+    events += [RawContentBlockDeltaEvent(type="content_block_delta", index=0, delta=TextDelta(type="text_delta", text=t))
+               for t in ["see ", "α", " ok ", "α"]]
+    events += [RawContentBlockStopEvent(type="content_block_stop", index=0),
+               RawMessageDeltaEvent(type="message_delta", delta=Delta(stop_reason="end_turn", stop_sequence=None),
+                                    usage=MessageDeltaUsage(output_tokens=3)),
+               RawMessageStopEvent(type="message_stop")]
+
+    class Raw:
+        def __iter__(self):
+            return iter(events)
+
+    stream = MessageStream(Raw(), output_format=anthropic.NOT_GIVEN)
+    wrapped = _RestoredMessageStream(stream, MAPPING)
+    out = list(wrapped)
+    texts = [e.text for e in out if e.type == "text"]
+    assert "".join(texts) == "see alpha_x ok alpha_x"
+    assert [e for e in out if e.type == "text"][-1].snapshot == "see alpha_x ok alpha_x"
+    assert "".join(e.delta.text for e in out if e.type == "content_block_delta") == "see alpha_x ok alpha_x"
+    assert wrapped.get_final_text() == "see alpha_x ok alpha_x"
+    assert stream.get_final_message().content[0].text == "see alpha_x ok alpha_x"

@@ -107,6 +107,7 @@ reply = client.messages.create(model="claude-sonnet-5-5", system=SYSTEM, message
 with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512) as stream:
     for text in stream.text_stream:        # decoded, even when an alias is split across events
         print(text, end="")
+    # or iterate the SDK's events (raw, `text`, `content_block_stop`) — all decoded; use one consumer per stream
 ```
 
 > The wrappers protect `chat.completions.create`, `responses.create`, `messages.create` and `messages.stream`. Other endpoints (batches, legacy completions, …) are **not** protected: unprotected `messages.*` methods raise instead of silently sending plaintext, but other client attributes are forwarded as-is.
@@ -276,7 +277,7 @@ flowchart LR
 
 ## Roadmap
 
-Anthropic raw-event iteration from `messages.stream()`.
+Date detector (dates are currently split into number aliases) · LlamaIndex `FunctionCallingLLM` / tool schemas · OpenAI `responses.parse`/`responses.stream` helpers · Chat Completions streaming with `n>1`.
 
 ## Development
 

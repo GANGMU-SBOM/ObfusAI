@@ -108,6 +108,7 @@ reply = client.messages.create(model="claude-sonnet-5-5", system=SYSTEM, message
 with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512) as stream:
     for text in stream.text_stream:        # 已还原；别名被切在两个事件之间也没问题
         print(text, end="")
+    # 也可以直接迭代 SDK 事件（原始事件、`text`、`content_block_stop`），同样已还原；每个流只用一种消费方式
 ```
 
 > 包装器保护 `chat.completions.create`、`responses.create`、`messages.create` 与 `messages.stream`。其他接口（批处理、旧版 completions 等）**不受保护**：未受保护的 `messages.*` 方法会直接报错而不是悄悄发出明文，其他客户端属性则原样转发。
@@ -277,7 +278,7 @@ flowchart LR
 
 ## 路线图
 
-`messages.stream()` 的原始事件迭代还原。
+日期检测器（目前日期会被拆成多个数字别名）· LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法 · `n>1` 的 Chat Completions 流式。
 
 ## 开发
 

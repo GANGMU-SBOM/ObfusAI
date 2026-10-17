@@ -236,8 +236,6 @@ def test_anthropic_message_stream_manager() -> None:
         assert stream.get_final_message().content[0].text == "The metric edge_bps matters."
         assert stream.get_final_text() == "The metric edge_bps matters."
         assert stream.current_message_snapshot == "snapshot"
-        with pytest.raises(NotImplementedError):
-            iter(stream)
     assert manager._inner.exited
 
 
@@ -385,3 +383,49 @@ def test_core_responses_style_detection() -> None:
     assert engine.obfuscate_payload({"input": "plain"}).anchor == ""
     chat = engine.obfuscate_payload({"messages": [{"role": "system", "content": "limit_x = 42.5"}]})
     assert "messages" in chat.payload and "instructions" not in chat.payload
+
+
+def _parsed_events(text: str, size: int) -> list:
+    """What the SDK's messages.stream() yields: raw events followed by derived ones."""
+    block = NS(type="text", text="")
+    events = [NS(type="message_start"), NS(type="content_block_start", index=0)]
+    acc = ""
+    for i in range(0, len(text), size):
+        piece = text[i : i + size]
+        acc += piece
+        block.text = acc  # the SDK's shared snapshot block
+        events.append(NS(type="content_block_delta", index=0, delta=NS(type="text_delta", text=piece)))
+        events.append(NS(type="text", text=piece, snapshot=acc))
+    events.append(NS(type="content_block_stop", index=0, content_block=block))
+    events.append(NS(type="message_stop", message=NS(content=[block])))
+    return events
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 100])
+def test_message_stream_event_iteration_is_decoded(chunk: int) -> None:
+    from obfusai.adapters.anthropic import _RestoredMessageStream
+
+    mapping = {"α": "edge_bps"}
+    raw_text = "The metric α matters."
+    events = list(_RestoredMessageStream(_parsed_events(raw_text, chunk), mapping))
+    deltas = "".join(e.delta.text for e in events if e.type == "content_block_delta")
+    texts = [e for e in events if e.type == "text"]
+    assert deltas == "The metric edge_bps matters." == "".join(e.text for e in texts)
+    assert texts[-1].snapshot == "The metric edge_bps matters."
+    assert all("The metric edge_bps matters.".startswith(e.snapshot) for e in texts)  # snapshots only grow
+    kinds = [e.type for e in events]
+    stop = kinds.index("content_block_stop")
+    assert all(k in ("content_block_delta", "text") for k in kinds[2:stop])  # tail emitted before the stop
+    stop_event = events[stop]
+    assert stop_event.content_block.text == "The metric edge_bps matters."
+    assert events[-1].message.content[0].text == "The metric edge_bps matters."
+
+
+def test_message_stream_async_event_iteration() -> None:
+    from obfusai.adapters.anthropic import _RestoredMessageStream
+
+    async def run() -> str:
+        wrapped = _RestoredMessageStream(_AsyncIter(_parsed_events("The metric α matters.", 2)), {"α": "edge_bps"})
+        return "".join([e.text async for e in wrapped if e.type == "text"])
+
+    assert asyncio.run(run()) == "The metric edge_bps matters."

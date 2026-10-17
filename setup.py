@@ -6,7 +6,7 @@ README = Path(__file__).parent / "README.md"
 
 setup(
     name="obfusai",
-    version="0.6.0",
+    version="0.7.0",
     description="Obfuscate LLM prompts, roles and tool schemas while keeping them executable by LLMs.",
     long_description=README.read_text(encoding="utf-8") if README.exists() else "",
     long_description_content_type="text/markdown",
