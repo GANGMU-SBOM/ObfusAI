@@ -27,6 +27,7 @@ from enum import Enum
 from typing import (
     Any,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Mapping,
@@ -37,21 +38,23 @@ from typing import (
     Union,
 )
 
+from . import anchor as _anchor
+from .anchor import DECOY_VALUE as _DECOY_VALUE
+
 __all__ = [
+    "DETECTORS",
     "Intensity",
     "ObfusAIComponent",
     "ObfuscatedPayload",
     "ObfuscationResult",
     "ObfuscationSession",
+    "ObfuscationStats",
 ]
 
-_ANCHOR_VERSION = "1"
 _SUBSCRIPT_DIGITS = str.maketrans(string.digits, "₀₁₂₃₄₅₆₇₈₉")
 
 # Greek glyphs that do not look like Latin letters or digits.
 _SYMBOL_POOL: Tuple[str, ...] = tuple("αβγδεζηθικλμνξπρστφχψω") + tuple("ΓΔΘΛΞΠΣΦΨΩ")
-
-_DECOY_VALUE = "∅"
 
 #: Spans that must survive untouched so templating and chat-format markers keep working.
 _PROTECTED_RE: Pattern[str] = re.compile(
@@ -68,16 +71,19 @@ _NUMBER_RE: Pattern[str] = re.compile(
     r"[$€£¥]?"
     r"\d[\d,]*(?:\.\d+)?"
     r"(?:%|\s?(?:bps|bp|ms|MB|GB|TB|USD|EUR|GBP|[kKMBx])(?![\w]))?"
-    r"(?![\w])"
+    r"(?!\.\d)(?![\w])"  # not the head of "10.0.0.7" or "1.2.3"
 )
 _IDENTIFIER_RES: Tuple[Pattern[str], ...] = (
     re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b"),  # snake_case
     re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b"),  # UPPER_SNAKE
     re.compile(r"\b[a-z]+(?:[A-Z][a-z0-9]+)+\b"),  # camelCase
     re.compile(r"\b(?:[A-Z][a-z0-9]+){2,}\b"),  # PascalCase
-    re.compile(r"\b[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+\b"),  # dotted.path
+    re.compile(r"(?<!@)\b[A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+\b"),  # dotted.path (not e-mail domains)
     re.compile(r"\b[A-Za-z_]\w*\(\)"),  # call()
 )
+_EMAIL_RE: Pattern[str] = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+_URL_RE: Pattern[str] = re.compile(r"https?://[^\s<>\"'`)\]]*[^\s<>\"'`)\].,;:!?]")
+_IP_RE: Pattern[str] = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
 _QUOTED_RE: Pattern[str] = re.compile(r'"([^"\n]{2,200})"|`([^`\n]{2,200})`')
 _TITLE_PHRASE_RE: Pattern[str] = re.compile(r"\b[A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,})+\b")
 _ACRONYM_RE: Pattern[str] = re.compile(r"\b[A-Z]{3,8}\b")
@@ -110,13 +116,27 @@ class Intensity(str, Enum):
     HIGH = "high"
 
 
+#: name -> ((pattern, replace-capture-groups-instead-of-whole-match), ...)
+_DETECTOR_PATTERNS: Dict[str, Tuple[Tuple[Pattern[str], bool], ...]] = {
+    "identifiers": tuple((p, False) for p in _IDENTIFIER_RES),
+    "quoted": ((_QUOTED_RE, True),),
+    "emails": ((_EMAIL_RE, False),),
+    "urls": ((_URL_RE, False),),
+    "ips": ((_IP_RE, False),),
+    "numbers": ((_NUMBER_RE, False),),
+    "phrases": ((_TITLE_PHRASE_RE, False),),
+    "acronyms": ((_ACRONYM_RE, False),),
+    "words": ((_LONG_WORD_RE, False),),
+}
+#: Detector names accepted by ``detectors=`` / ``extra_detectors=`` (in matching order).
+DETECTORS: Tuple[str, ...] = tuple(_DETECTOR_PATTERNS)
+
+
 @dataclass(frozen=True)
 class _Profile:
     """Feature switches for one intensity level."""
 
-    quoted: bool
-    terms: bool
-    long_words: bool
+    detectors: FrozenSet[str]
     decoys: int
     reverse_values: bool
     wrap_symbols: bool
@@ -125,10 +145,34 @@ class _Profile:
 
 
 _PROFILES: Dict[Intensity, _Profile] = {
-    Intensity.LOW: _Profile(False, False, False, 0, False, False, False),
-    Intensity.MEDIUM: _Profile(True, True, False, 0, False, False, False),
-    Intensity.HIGH: _Profile(True, True, True, 4, True, True, True),
+    Intensity.LOW: _Profile(frozenset({"identifiers", "numbers"}), 0, False, False, False),
+    Intensity.MEDIUM: _Profile(
+        frozenset({"identifiers", "numbers", "quoted", "phrases", "acronyms"}),
+        0, False, False, False,
+    ),
+    Intensity.HIGH: _Profile(
+        frozenset({"identifiers", "numbers", "quoted", "phrases", "acronyms", "words"}),
+        4, True, True, True,
+    ),
 }
+
+
+@dataclass(frozen=True)
+class ObfuscationStats:
+    """Size accounting for an obfuscation run (characters, not tokens)."""
+
+    aliases: int
+    replacements: int
+    source_chars: int
+    text_chars: int
+    anchor_chars: int
+
+    @property
+    def growth(self) -> float:
+        """Output size (text + anchor) divided by source size; ``1.0`` when nothing changed."""
+        if not self.source_chars:
+            return 1.0
+        return (self.text_chars + self.anchor_chars) / self.source_chars
 
 
 @dataclass(frozen=True)
@@ -142,6 +186,7 @@ class ObfuscationResult:
     session_id: str
     anchor_position: str = "append"
     warnings: Tuple[str, ...] = ()
+    stats: Optional[ObfuscationStats] = None
 
     @property
     def prompt(self) -> str:
@@ -161,6 +206,8 @@ class ObfuscatedPayload:
     mapping: Mapping[str, str]
     anchor: str
     session_id: str
+    warnings: Tuple[str, ...] = ()
+    stats: Optional[ObfuscationStats] = None
 
     def restore(self, text: str) -> str:
         """Replace aliases found in ``text`` by their originals."""
@@ -182,11 +229,6 @@ def _join_anchor(text: str, anchor: str, position: str) -> str:
     if position == "prepend":
         return f"{anchor}\n\n{text}"
     return f"{text}\n\n{anchor}"
-
-
-def _quote(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
 
 
 def _digest(*parts: str) -> str:
@@ -211,6 +253,9 @@ class ObfuscationSession:
         self._mapping: Dict[str, str] = {}
         self._next_index = 0
         self._warnings: List[str] = []
+        self._replacements = 0
+        self._source_chars = 0
+        self._text_chars = 0
 
     @property
     def mapping(self) -> Dict[str, str]:
@@ -226,6 +271,23 @@ class ObfuscationSession:
         """Meta-instruction block describing every alias issued so far."""
         return self._component._render_anchor(self)
 
+    @property
+    def stats(self) -> ObfuscationStats:
+        """Size accounting over everything encoded so far."""
+        return ObfuscationStats(
+            aliases=len(self._mapping),
+            replacements=self._replacements,
+            source_chars=self._source_chars,
+            text_chars=self._text_chars,
+            anchor_chars=len(self.anchor),
+        )
+
+    def _wrap(self, bare: str) -> str:
+        return f"⟦{bare}⟧" if self._profile.wrap_symbols else bare
+
+    def _is_free(self, bare: str, wrapped: str) -> bool:
+        return not (bare in self._reserved or wrapped in self._reserved or wrapped in self._mapping)
+
     def _new_token(self) -> str:
         order = self._component._symbol_order
         while True:
@@ -234,16 +296,30 @@ class ObfuscationSession:
             base = order[idx % len(order)]
             generation = idx // len(order)
             suffix = str(generation).translate(_SUBSCRIPT_DIGITS) if generation else ""
-            bare = base + suffix
-            wrapped = f"⟦{bare}⟧" if self._profile.wrap_symbols else bare
-            if bare in self._reserved or wrapped in self._reserved:
-                continue
-            return wrapped
+            wrapped = self._wrap(base + suffix)
+            if self._is_free(base + suffix, wrapped):
+                return wrapped
+
+    def _stable_token(self, value: str) -> str:
+        """Alias derived from the value and the key only, so it survives across sessions."""
+        order = self._component._symbol_order
+        h = int(_digest(self._component.key, "alias", value), 16)
+        for probe in range(4096):
+            k = h + probe
+            bare = order[k % len(order)] + str((k // len(order)) % 1000).translate(_SUBSCRIPT_DIGITS)
+            wrapped = self._wrap(bare)
+            if self._is_free(bare, wrapped):
+                return wrapped
+        return self._new_token()  # pragma: no cover - 4096 consecutive collisions
 
     def _token_for(self, value: str) -> str:
         token = self._value_to_token.get(value)
         if token is None:
-            token = self._new_token()
+            token = (
+                self._stable_token(value)
+                if self._component.alias_mode == "stable"
+                else self._new_token()
+            )
             self._value_to_token[value] = token
             self._mapping[token] = value
         return token
@@ -254,13 +330,12 @@ class ObfuscationSession:
             return ""
         if not isinstance(text, str):
             raise TypeError(f"expected str, got {type(text).__name__}")
+        self._source_chars += len(text)
         try:
             spans = self._component._extract(text, self._profile, self._warnings)
         except Exception as exc:  # pragma: no cover - defensive, extraction is regex-only
             self._warnings.append(f"extraction aborted: {exc.__class__.__name__}")
-            return text
-        if not spans:
-            return text
+            spans = []
         out: List[str] = []
         cursor = 0
         for span in spans:
@@ -268,7 +343,10 @@ class ObfuscationSession:
             out.append(self._token_for(span.value))
             cursor = span.end
         out.append(text[cursor:])
-        return "".join(out)
+        encoded = "".join(out)
+        self._replacements += len(spans)
+        self._text_chars += len(encoded)
+        return encoded
 
     def decorate(self, text: str, position: Optional[str] = None) -> str:
         """Attach this session's anchor to ``text``."""
@@ -293,7 +371,21 @@ class ObfusAIComponent:
             prompt caching).  Defaults to a fresh random value per instance.
         keywords: Extra terms that are always obfuscated (case-insensitive).
         protected: Terms that are never obfuscated.
+        rules: Custom regular expressions (strings or compiled patterns) whose
+            matches are always obfuscated.  When a pattern has capture groups,
+            only the groups are replaced.  Invalid patterns raise ``ValueError``.
+        detectors: Replace the detector set of the chosen intensity.  Names are
+            listed in :data:`DETECTORS`.
+        extra_detectors: Add detectors (e.g. ``("emails", "urls", "ips")``) to the
+            intensity's set.
+        alias_mode: ``"sequential"`` (default; aliases follow first occurrence) or
+            ``"stable"`` (an alias depends only on the key and the value, so the
+            same value gets the same alias in every prompt: better for prompt
+            caching and for several prompts that share one conversation).
         anchor_position: ``"append"`` (default) or ``"prepend"``.
+        anchor_language: Language of the decoding instructions, ``"en"`` or ``"zh"``.
+        anchor_style: ``"full"`` (default) or ``"compact"`` (shorter instructions,
+            fewer tokens, slightly less guidance for weaker models).
     """
 
     def __init__(
@@ -303,7 +395,13 @@ class ObfusAIComponent:
         seed: Union[str, int, bytes, None] = None,
         keywords: Iterable[str] = (),
         protected: Iterable[str] = (),
+        rules: Iterable[Union[str, Pattern[str]]] = (),
+        detectors: Optional[Iterable[str]] = None,
+        extra_detectors: Iterable[str] = (),
+        alias_mode: str = "sequential",
         anchor_position: str = "append",
+        anchor_language: str = "en",
+        anchor_style: str = "full",
     ) -> None:
         try:
             self.intensity: Intensity = (
@@ -313,9 +411,21 @@ class ObfusAIComponent:
             raise ValueError(
                 f"intensity must be one of 'low', 'medium', 'high'; got {intensity!r}"
             ) from None
-        if anchor_position not in ("append", "prepend"):
-            raise ValueError("anchor_position must be 'append' or 'prepend'")
+        _check_choice("anchor_position", anchor_position, ("append", "prepend"))
+        _check_choice("alias_mode", alias_mode, ("sequential", "stable"))
+        _check_choice("anchor_language", anchor_language, _anchor.LANGUAGES)
+        _check_choice("anchor_style", anchor_style, _anchor.STYLES)
         self.anchor_position = anchor_position
+        self.alias_mode = alias_mode
+        self.anchor_language = anchor_language
+        self.anchor_style = anchor_style
+
+        base = _PROFILES[self.intensity].detectors if detectors is None else frozenset(detectors)
+        chosen = base | frozenset(extra_detectors)
+        unknown = sorted(chosen - set(DETECTORS))
+        if unknown:
+            raise ValueError(f"unknown detectors {unknown}; choose from {list(DETECTORS)}")
+        self.detectors: FrozenSet[str] = chosen
 
         if seed is None:
             seed = secrets.token_hex(16)
@@ -327,6 +437,7 @@ class ObfusAIComponent:
         )
         self._keyword_re = self._compile_terms(keywords)
         self._protected_re = self._compile_terms(protected)
+        self._rules = self._compile_rules(rules)
 
     # ------------------------------------------------------------------ public API
 
@@ -358,6 +469,7 @@ class ObfusAIComponent:
             session_id=session.session_id,
             anchor_position=self.anchor_position,
             warnings=session.warnings,
+            stats=session.stats,
         )
 
     def protect(self, text: Optional[str]) -> str:
@@ -367,11 +479,7 @@ class ObfusAIComponent:
     @staticmethod
     def deobfuscate(text: Optional[str], mapping: Mapping[str, str]) -> str:
         """Replace every alias in ``text`` with the original value from ``mapping``."""
-        if not text or not mapping:
-            return text or ""
-        tokens = sorted(mapping, key=len, reverse=True)
-        pattern = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(t) for t in tokens) + r")(?!\w)")
-        return pattern.sub(lambda m: mapping[m.group(0)], text)
+        return _anchor.substitute(text or "", mapping)
 
     def obfuscate_payload(
         self,
@@ -397,8 +505,7 @@ class ObfusAIComponent:
         """
         if not isinstance(payload, Mapping):
             raise TypeError("payload must be a mapping")
-        if style not in ("auto", "openai", "anthropic"):
-            raise ValueError("style must be 'auto', 'openai' or 'anthropic'")
+        _check_choice("style", style, ("auto", "openai", "anthropic"))
         body: Dict[str, Any] = copy.deepcopy(dict(payload))
         if style == "auto":
             tools = body.get("tools")
@@ -423,7 +530,9 @@ class ObfusAIComponent:
         anchor = session.anchor
         if anchor:
             self._attach_anchor(body, anchor, style, roles)
-        return ObfuscatedPayload(body, session.mapping, anchor, session.session_id)
+        return ObfuscatedPayload(
+            body, session.mapping, anchor, session.session_id, session.warnings, session.stats
+        )
 
     # ------------------------------------------------------------------ internals
 
@@ -436,52 +545,64 @@ class ObfusAIComponent:
             r"(?<!\w)(?:" + "|".join(re.escape(t) for t in cleaned) + r")(?!\w)", re.IGNORECASE
         )
 
+    @staticmethod
+    def _compile_rules(rules: Iterable[Union[str, Pattern[str]]]) -> Tuple[Pattern[str], ...]:
+        compiled: List[Pattern[str]] = []
+        for rule in rules:
+            if isinstance(rule, str):
+                try:
+                    compiled.append(re.compile(rule))
+                except re.error as exc:
+                    raise ValueError(f"invalid rule pattern {rule!r}: {exc}") from None
+            elif hasattr(rule, "finditer"):
+                compiled.append(rule)
+            else:
+                raise TypeError(f"rules must be str or compiled patterns, got {type(rule).__name__}")
+        return tuple(compiled)
+
     def _extract(self, text: str, profile: _Profile, warnings: List[str]) -> List[_Span]:
         """Return non-overlapping spans to replace, in text order."""
         blocked: List[Tuple[int, int]] = [m.span() for m in _PROTECTED_RE.finditer(text)]
         if self._protected_re is not None:
             blocked.extend(m.span() for m in self._protected_re.finditer(text))
 
-        # Candidates are tried in priority order; ties on start are won by the longest span.
-        candidates: List[Tuple[int, int, int]] = []  # (start, end, priority)
+        # Insertion order breaks ties: when two spans start together the longer wins,
+        # and between equals the earlier-added source (keywords, rules, detectors) wins.
+        candidates: List[Tuple[int, int, str]] = []  # (start, end, detector)
 
-        def add(pattern: Optional[Pattern[str]], priority: int, group: int = 0) -> None:
+        def add(pattern: Optional[Pattern[str]], detector: str, groups_only: bool = False) -> None:
             if pattern is None:
                 return
             try:
-                groups = range(1, pattern.groups + 1) if group < 0 else (group,)
+                groups = range(1, pattern.groups + 1) if groups_only else (0,)
                 for m in pattern.finditer(text):
                     for g in groups:
                         if m.group(g) is None:
                             continue
                         start, end = m.span(g)
                         if end > start:
-                            candidates.append((start, end, priority))
+                            candidates.append((start, end, detector))
             except Exception as exc:  # pragma: no cover - defensive
                 warnings.append(f"pattern skipped: {exc.__class__.__name__}")
 
-        add(self._keyword_re, 0)
-        for pattern in _IDENTIFIER_RES:
-            add(pattern, 1)
-        add(_NUMBER_RE, 2)
-        if profile.quoted:
-            add(_QUOTED_RE, 1, group=-1)
-        if profile.terms:
-            add(_TITLE_PHRASE_RE, 3)
-            add(_ACRONYM_RE, 4)
-        if profile.long_words:
-            add(_LONG_WORD_RE, 5)
+        add(self._keyword_re, "keywords")
+        for rule in self._rules:
+            add(rule, "rules", groups_only=rule.groups > 0)
+        for name in DETECTORS:
+            if name in self.detectors:
+                for pattern, groups_only in _DETECTOR_PATTERNS[name]:
+                    add(pattern, name, groups_only)
 
-        candidates.sort(key=lambda c: (c[0], -(c[1] - c[0]), c[2]))
+        candidates.sort(key=lambda c: (c[0], -(c[1] - c[0])))
         spans: List[_Span] = []
         last_end = 0
-        for start, end, priority in candidates:
+        for start, end, detector in candidates:
             if start < last_end:
                 continue
             if any(start < b_end and end > b_start for b_start, b_end in blocked):
                 continue
             value = text[start:end]
-            if not self._worth_replacing(text, start, end, value, priority, profile):
+            if not self._worth_replacing(text, start, end, value, detector, profile):
                 continue
             spans.append(_Span(start, end, value))
             last_end = end
@@ -489,18 +610,18 @@ class ObfusAIComponent:
 
     @staticmethod
     def _worth_replacing(
-        text: str, start: int, end: int, value: str, priority: int, profile: _Profile
+        text: str, start: int, end: int, value: str, detector: str, profile: _Profile
     ) -> bool:
-        if priority == 2:  # numbers
+        if detector == "numbers":
             if len(value) == 1 and value.isdigit():
                 return False
             line_start = text.rfind("\n", 0, start) + 1
             if not text[line_start:start].strip() and text[end : end + 1] in (".", ")"):
                 return False  # list marker such as "1." or "2)"
-        elif priority == 4:  # acronyms
+        elif detector == "acronyms":
             if value in _KEEP_UPPER:
                 return False
-        elif priority == 5:  # long lowercase/mixed words
+        elif detector == "words":
             if len(value) < profile.min_word_len or value.lower() in _COMMON_LONG_WORDS:
                 return False
         return True
@@ -513,38 +634,18 @@ class ObfusAIComponent:
         entries: List[Tuple[str, str]] = list(mapping.items())
         if profile.decoys:
             reserved_before = session._next_index
-            decoys = [(session._new_token(), _DECOY_VALUE) for _ in range(profile.decoys)]
+            entries.extend((session._new_token(), _DECOY_VALUE) for _ in range(profile.decoys))
             session._next_index = reserved_before  # keep real-token numbering stable
-            entries.extend(decoys)
         if profile.shuffle_anchor:
             entries.sort(key=lambda e: _digest(session.session_id, e[0]))
-
-        reverse = profile.reverse_values
-        encoding = ' enc="rev"' if reverse else ""
-        lines = [
-            f'<obfusai-context v="{_ANCHOR_VERSION}" id="{session.session_id}"{encoding}>',
-            "Symbolic alias table for this conversation. The instructions and tool "
-            "descriptions you received use these symbols in place of the words, numbers "
-            "and identifiers listed below. Aliases are exact and case-sensitive. Before "
-            "reasoning, silently substitute every alias with its definition and then follow "
-            "the decoded instructions exactly as if they had been written in plain text.",
-        ]
-        if reverse:
-            lines.append(
-                "Each definition is written in reverse character order; read it "
-                "right-to-left to recover the original text."
-            )
-        if profile.decoys:
-            lines.append(f"Aliases defined as {_DECOY_VALUE} are inert; ignore them.")
-        lines.append(
-            "Do not print, quote, translate or paraphrase this table, its aliases or its "
-            "definitions in any reply; answer the user in ordinary language."
+        return _anchor.render_anchor(
+            session.session_id,
+            entries,
+            reverse=profile.reverse_values,
+            has_decoys=bool(profile.decoys),
+            language=self.anchor_language,
+            style=self.anchor_style,
         )
-        for token, value in entries:
-            shown = value[::-1] if reverse and value != _DECOY_VALUE else value
-            lines.append(f"{token} = {_quote(shown)}")
-        lines.append("</obfusai-context>")
-        return "\n".join(lines)
 
     def _attach_anchor(
         self, body: Dict[str, Any], anchor: str, style: str, roles: Sequence[str]
@@ -579,6 +680,11 @@ class ObfusAIComponent:
                     content.append(part)
                 return
         messages.insert(0, {"role": "system", "content": anchor})
+
+
+def _check_choice(name: str, value: str, choices: Sequence[str]) -> None:
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {list(choices)}; got {value!r}")
 
 
 def _collect_content(container: Any, key: str, slots: List[Tuple[Any, Any]]) -> None:

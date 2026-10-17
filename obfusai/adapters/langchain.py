@@ -9,11 +9,17 @@ Requires ``langchain-core`` (``pip install obfusai[langchain]``).
   chat model.  It obfuscates system messages and attaches one shared anchor::
 
       chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model
+
+* :class:`ObfusAIProtectedModel` - wraps a chat model so the whole round trip
+  (obfuscate the request, call the model, decode aliases in the reply, also
+  while streaming) happens in one thread-safe step::
+
+      chain = prompt | ObfusAIProtectedModel(chat_model, ObfusAIComponent("high"))
 """
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:
     from langchain_core.documents import BaseDocumentTransformer, Document
@@ -31,8 +37,9 @@ except ImportError as exc:  # pragma: no cover - exercised only without langchai
     ) from exc
 
 from ..core import ObfusAIComponent
+from ..guard import StreamRestorer
 
-__all__ = ["ObfusAIDocumentTransformer", "ObfusAIRunnable"]
+__all__ = ["ObfusAIDocumentTransformer", "ObfusAIProtectedModel", "ObfusAIRunnable"]
 
 PromptInput = Union[str, PromptValue, Sequence[Any]]
 
@@ -170,3 +177,89 @@ def _with_content(message: BaseMessage, content: Any) -> BaseMessage:
     if hasattr(message, "model_copy"):
         return message.model_copy(update={"content": content})
     return message.copy(update={"content": content})  # pragma: no cover - legacy langchain-core
+
+
+def _restore_content(content: Any, mapping: Mapping[str, str]) -> Any:
+    """Decode aliases in a message ``content`` value (string or list of parts)."""
+    if isinstance(content, str):
+        return ObfusAIComponent.deobfuscate(content, mapping)
+    if isinstance(content, list):
+        restored: List[Any] = []
+        for part in content:
+            if isinstance(part, str):
+                restored.append(ObfusAIComponent.deobfuscate(part, mapping))
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                restored.append({**part, "text": ObfusAIComponent.deobfuscate(part["text"], mapping)})
+            else:
+                restored.append(part)
+        return restored
+    return content
+
+
+def _restore_output(output: Any, mapping: Mapping[str, str]) -> Any:
+    if isinstance(output, BaseMessage):
+        return _with_content(output, _restore_content(output.content, mapping))
+    if isinstance(output, str):
+        return ObfusAIComponent.deobfuscate(output, mapping)
+    return output
+
+
+class ObfusAIProtectedModel(Runnable):  # type: ignore[type-arg]
+    """Wrap a chat model so requests are obfuscated and replies decoded.
+
+    Each call builds its own alias table, so one instance can serve concurrent
+    requests.  ``stream`` decodes aliases chunk by chunk (string content).
+
+    Args:
+        model: Any LangChain chat model or runnable accepting messages.
+        component: Engine to use (defaults to ``ObfusAIComponent()``).
+        message_types: Message types whose text is obfuscated (default system).
+    """
+
+    def __init__(
+        self,
+        model: Runnable,  # type: ignore[type-arg]
+        component: Optional[ObfusAIComponent] = None,
+        *,
+        message_types: Sequence[str] = ("system",),
+    ) -> None:
+        self.model = model
+        self._obfuscator = ObfusAIRunnable(component, message_types=message_types)
+
+    @property
+    def component(self) -> ObfusAIComponent:
+        return self._obfuscator.component
+
+    def invoke(self, input: PromptInput, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
+        messages, mapping = self._obfuscator.invoke_with_mapping(input)
+        return _restore_output(self.model.invoke(messages, config, **kwargs), mapping)
+
+    def stream(self, input: PromptInput, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Iterator[Any]:
+        messages, mapping = self._obfuscator.invoke_with_mapping(input)
+        upstream = self.model.stream(messages, config, **kwargs)
+        if not mapping:
+            yield from upstream
+            return
+        restorer = StreamRestorer(mapping)
+        previous: Any = None
+        for chunk in upstream:
+            text = _chunk_text(chunk)
+            if text:
+                chunk = _with_chunk_text(chunk, restorer.feed(text))
+            if previous is not None:
+                yield previous
+            previous = chunk
+        if previous is not None:
+            tail = restorer.flush()
+            if tail:  # text still buffered at end of stream rides on the final chunk
+                previous = _with_chunk_text(previous, (_chunk_text(previous) or "") + tail)
+            yield previous
+
+
+def _chunk_text(chunk: Any) -> Optional[str]:
+    content = chunk if isinstance(chunk, str) else getattr(chunk, "content", None)
+    return content if isinstance(content, str) else None
+
+
+def _with_chunk_text(chunk: Any, text: str) -> Any:
+    return text if isinstance(chunk, str) else _with_content(chunk, text)

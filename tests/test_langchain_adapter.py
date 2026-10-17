@@ -42,3 +42,29 @@ def test_runnable_inputs() -> None:
     multi = step.invoke([SystemMessage(content=[{"type": "text", "text": "limit_x = 42.5"}])])
     assert "limit_x" not in multi[0].content[0]["text"]
     assert multi[0].content[-1]["text"].startswith("<obfusai-context")
+
+
+def test_protected_model_round_trip_and_stream() -> None:
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage
+
+    from obfusai.adapters.langchain import ObfusAIProtectedModel
+
+    engine = ObfusAIComponent("low", seed="s")
+    prompt = ChatPromptTemplate.from_messages([("system", "Alert when edge_bps > 35."), ("human", "{q}")])
+    seen = []
+
+    class Echo(GenericFakeChatModel):
+        def _generate(self, messages, *a, **k):  # reply with the first alias found in the system prompt
+            seen.append(messages[0].content)
+            alias = messages[0].content.split(" > ")[0].split()[-1]
+            self.messages = iter([AIMessage(content=f"Watching {alias} closely")])
+            return super()._generate(messages, *a, **k)
+
+    model = ObfusAIProtectedModel(Echo(messages=iter([])), engine)
+    out = model.invoke(prompt.invoke({"q": "go"}))
+    assert out.content == "Watching edge_bps closely"
+    assert "edge_bps" not in seen[0].split("<obfusai-context")[0]
+
+    chunks = list(model.stream(prompt.invoke({"q": "go"})))
+    assert "".join(c.content for c in chunks) == "Watching edge_bps closely"
