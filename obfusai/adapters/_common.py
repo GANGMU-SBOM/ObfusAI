@@ -7,7 +7,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from ..core import ObfusAIComponent
 
 #: Request fields that carry prompt text; everything else is forwarded untouched.
-PROMPT_FIELDS = ("messages", "tools", "system", "instructions", "input")
+PROMPT_FIELDS = ("messages", "tools", "system", "instructions", "input", "text", "response_format")
 
 
 def protect_kwargs(

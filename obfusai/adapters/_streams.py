@@ -230,12 +230,18 @@ class ChatChunkRestorer:
 
 
 class ResponsesEventRestorer:
-    """Stateful decoder for OpenAI Responses API stream events."""
+    """Stateful decoder for OpenAI Responses API stream events.
+
+    Handles the raw events of ``responses.create(stream=True)`` and the events of the
+    ``responses.stream()`` helper, whose text deltas also carry a cumulative
+    ``snapshot`` (decoded here as the text emitted so far).
+    """
 
     def __init__(self, mapping: Mapping[str, str]) -> None:
         self.mapping = dict(mapping)
         self._restorers: Dict[Hashable, StreamRestorer] = {}
         self._templates: Dict[Hashable, Any] = {}
+        self._decoded: Dict[Hashable, str] = {}
 
     @staticmethod
     def _key(event: Any) -> Tuple[Any, Any, Any]:
@@ -248,6 +254,7 @@ class ResponsesEventRestorer:
     def _drain(self, key: Hashable) -> List[Any]:
         restorer = self._restorers.pop(key, None)
         template = self._templates.pop(key, None)
+        decoded = self._decoded.pop(key, "")
         if restorer is None or template is None:
             return []
         tail = restorer.flush()
@@ -255,6 +262,8 @@ class ResponsesEventRestorer:
             return []
         event = _clone(template)
         event.delta = tail
+        if hasattr(template, "snapshot"):
+            event.snapshot = decoded + tail
         return [event]
 
     def process(self, event: Any) -> List[Any]:
@@ -263,7 +272,11 @@ class ResponsesEventRestorer:
         if kind == "response.output_text.delta" and isinstance(getattr(event, "delta", None), str):
             key = self._key(event)
             restorer = self._restorers.setdefault(key, StreamRestorer(self.mapping))
-            event.delta = restorer.feed(event.delta)
+            piece = restorer.feed(event.delta)
+            self._decoded[key] = self._decoded.get(key, "") + piece
+            event.delta = piece
+            if hasattr(event, "snapshot"):
+                event.snapshot = self._decoded[key]
             self._templates[key] = event
         elif kind == "response.output_text.done":
             out.extend(self._drain(self._key(event)))

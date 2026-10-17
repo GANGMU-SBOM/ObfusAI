@@ -102,6 +102,12 @@ client = ObfusAIOpenAI(OpenAI(), ObfusAIComponent("high", seed="my-secret"))
 reply = client.chat.completions.create(model="gpt-4o", messages=[...], tools=[...])   # 流式同样支持
 reply = client.responses.create(model="gpt-4o", instructions=SYSTEM, input="hi", tools=[...])  # Responses API
 print(reply.output_text)                                                              # 已还原
+parsed = client.responses.parse(model="gpt-4o", instructions=SYSTEM, input="hi", text_format=Signal)   # 结构化输出
+
+with client.responses.stream(model="gpt-4o", instructions=SYSTEM, input="hi") as stream:   # 流式辅助
+    for event in stream:                     # delta / snapshot / done 事件均已还原
+        ...
+    final = stream.get_final_response()      # 已还原
 ```
 
 ```python
@@ -117,7 +123,7 @@ with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[
     # 也可以直接迭代 SDK 事件（原始事件、`text`、`content_block_stop`），同样已还原；每个流只用一种消费方式
 ```
 
-> 包装器保护 `chat.completions.create`、`responses.create`、`messages.create` 与 `messages.stream`。其他接口（批处理、旧版 completions 等）**不受保护**：未受保护的 `messages.*` 方法会直接报错而不是悄悄发出明文，其他客户端属性则原样转发。
+> 包装器保护 `chat.completions.create`、`responses.create` / `parse` / `stream`、`messages.create` 与 `messages.stream`。其他接口（批处理、旧版 completions 等）**不受保护**：未受保护的 `messages.*` 方法会直接报错而不是悄悄发出明文，其他客户端属性则原样转发。字典形式的结构化输出 Schema（`text`、`response_format`）会像工具 Schema 一样被混淆；以 pydantic 类给出的 Schema（`text_format`）由 SDK 转换后原样发送，`output_parsed` 由 SDK 根据模型的原始文本解析。
 
 ### LangChain
 
@@ -141,7 +147,7 @@ engine = index.as_query_engine(
 )
 ```
 
-建议在查询阶段用后处理器混淆，这样检索仍然基于可读文本；`ObfusAITransform`（入库阶段）会把混淆后的文本存进索引，向量检索效果会变差。请把 `system_prompt` 设在包装器上，而不是被包装的 LLM 上；工具调用（`FunctionCallingLLM`）相关方法不会被转发；节点元数据只有在 `obfuscate_metadata=True` 时才会被混淆。
+建议在查询阶段用后处理器混淆，这样检索仍然基于可读文本；`ObfusAITransform`（入库阶段）会把混淆后的文本存进索引，向量检索效果会变差。请把 `system_prompt` 设在包装器上，而不是被包装的 LLM 上。`ObfusAILLM` 本身就是 `FunctionCallingLLM`：`chat_with_tools`、`predict_and_call`、Agent 以及各流式变体都能用，字典形式的工具 Schema（OpenAI、Anthropic、Mistral 类提供商）里的 `description` / `title` 文本会与系统提示词共用同一张别名表被混淆（名称、参数、枚举保持不变）。节点元数据只有在 `obfuscate_metadata=True` 时才会被混淆。
 
 ## 三档强度
 
@@ -284,7 +290,7 @@ flowchart LR
 
 ## 路线图
 
-LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法。
+Chat Completions 的 `parse` / `stream` 辅助方法 · 混淆以 pydantic 类给出的结构化输出 Schema · 还原工具调用参数里的别名。
 
 ## 开发
 

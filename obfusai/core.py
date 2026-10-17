@@ -185,7 +185,8 @@ class FieldPolicy:
 
     Field names used by the built-in integrations: message roles (``"system"``,
     ``"developer"``, ``"user"``, ...), ``"instructions"`` (Responses API), ``"tools"``
-    (tool/function schema text), ``"documents"`` / ``"nodes"`` (RAG chunks).  The key
+    (tool/function schema text), ``"schemas"`` (structured-output schema text),
+    ``"documents"`` / ``"nodes"`` (RAG chunks).  The key
     ``"*"`` is the fallback for fields without an entry.
 
     Attributes:
@@ -550,7 +551,9 @@ class ObfusAIComponent:
         ``description``/``title`` strings of tool schemas share one alias table;
         the anchor is attached to the system prompt (a system message is
         created when none exists).  Tool names, parameter names, enums and
-        types are left untouched so tool calls still bind correctly.
+        types are left untouched so tool calls still bind correctly.  Dict-form
+        structured-output schemas (``text`` / ``response_format``) get the same
+        treatment under the policy field ``"schemas"``.
 
         Args:
             payload: Request body (not mutated).
@@ -583,6 +586,9 @@ class ObfusAIComponent:
         top_field = "instructions" if style == "responses" else "system"
         _collect_content(body, top_field, slots, top_field)
         _collect_schema_text(body.get("tools"), text_keys, slots)
+        # structured-output schemas given as dicts (Responses ``text``, chat ``response_format``)
+        _collect_schema_text(body.get("text"), text_keys, slots, "schemas")
+        _collect_schema_text(body.get("response_format"), text_keys, slots, "schemas")
 
         session = self.session(c[k] for c, k, _ in slots)
         for container, key, field in slots:
@@ -832,15 +838,17 @@ def _collect_content(container: Any, key: str, slots: List[_Slot], field: str) -
                 slots.append((part, "text", field))
 
 
-def _collect_schema_text(node: Any, text_keys: Sequence[str], slots: List[_Slot]) -> None:
-    """Record string values stored under ``text_keys`` anywhere inside tool schemas."""
+def _collect_schema_text(
+    node: Any, text_keys: Sequence[str], slots: List[_Slot], field: str = "tools"
+) -> None:
+    """Record string values stored under ``text_keys`` anywhere inside a JSON schema."""
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(value, str):
                 if key in text_keys:
-                    slots.append((node, key, "tools"))
+                    slots.append((node, key, field))
             else:
-                _collect_schema_text(value, text_keys, slots)
+                _collect_schema_text(value, text_keys, slots, field)
     elif isinstance(node, list):
         for item in node:
-            _collect_schema_text(item, text_keys, slots)
+            _collect_schema_text(item, text_keys, slots, field)

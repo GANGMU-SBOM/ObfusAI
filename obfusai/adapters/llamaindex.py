@@ -10,8 +10,15 @@ Requires ``llama-index-core`` (``pip install obfusai[llamaindex]``).
       llm = ObfusAILLM(OpenAI(model="gpt-4o"), ObfusAIComponent("high", seed="..."))
       index.as_query_engine(llm=llm)
 
-  Configure ``system_prompt`` on the wrapper, not on the wrapped LLM.  Tool
-  calling (``FunctionCallingLLM`` methods) is not forwarded.
+  Configure ``system_prompt`` on the wrapper, not on the wrapped LLM.
+
+  The wrapper is a ``FunctionCallingLLM``: ``chat_with_tools``, ``predict_and_call``,
+  agents and the streaming variants work when the wrapped LLM supports them.  Tool
+  names, parameter names and enums are left untouched; the ``description`` / ``title``
+  text of dict-based tool schemas (OpenAI, Anthropic, Mistral and similar providers)
+  is obfuscated with the same alias table as the system prompt.  Providers that pass
+  tool specs as non-dict objects are forwarded unchanged.  Aliases inside the model's
+  tool-call arguments are not decoded.
 
 * :class:`ObfusAINodePostprocessor` - obfuscates retrieved nodes right before they
   are placed into the prompt, so retrieval itself still runs on readable text::
@@ -28,19 +35,20 @@ stays decodable.
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Generator, List, Mapping, Optional, Sequence, Tuple
+import copy
+from typing import Any, AsyncGenerator, Dict, Generator, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:
     from llama_index.core.base.llms.types import TextBlock
     from llama_index.core.bridge.pydantic import Field
     from llama_index.core.llms import (
-        LLM,
         ChatMessage,
         ChatResponse,
         CompletionResponse,
         LLMMetadata,
         MessageRole,
     )
+    from llama_index.core.llms.function_calling import FunctionCallingLLM
     from llama_index.core.postprocessor.types import BaseNodePostprocessor
     from llama_index.core.schema import (
         BaseNode,
@@ -55,7 +63,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without llama-in
         "install it with `pip install obfusai[llamaindex]`."
     ) from exc
 
-from ..core import ObfusAIComponent
+from ..core import ObfusAIComponent, _collect_schema_text
 from ..guard import StreamRestorer
 
 __all__ = ["ObfusAILLM", "ObfusAINodePostprocessor", "ObfusAITransform"]
@@ -66,11 +74,18 @@ _SYSTEM_ROLES = (MessageRole.SYSTEM, MessageRole.DEVELOPER)
 # --------------------------------------------------------------------------- messages
 
 
-def _protect_messages(
-    component: ObfusAIComponent, messages: Sequence[ChatMessage], roles: Sequence[MessageRole]
-) -> Tuple[List[ChatMessage], Mapping[str, str]]:
-    """Obfuscate the text of ``roles`` messages with one table; returns copies and the table."""
+def _protect_request(
+    component: ObfusAIComponent,
+    messages: Sequence[ChatMessage],
+    roles: Sequence[MessageRole],
+    kwargs: Mapping[str, Any],
+) -> Tuple[List[ChatMessage], Dict[str, Any], Mapping[str, str]]:
+    """Obfuscate ``roles`` messages and dict-based ``tools`` schemas with one alias table.
+
+    Returns copies of the messages and kwargs (the inputs are never mutated) plus the table.
+    """
     copies: List[ChatMessage] = [m.model_copy(deep=True) for m in messages]
+    new_kwargs: Dict[str, Any] = dict(kwargs)
     blocks: List[Tuple[Any, str]] = []  # (text block, policy field = role name)
     first_target: Optional[ChatMessage] = None
     for message in copies:
@@ -81,12 +96,21 @@ def _protect_messages(
             first_target = message
         blocks.extend((b, field) for b in message.blocks if getattr(b, "block_type", None) == "text")
 
-    session = component.session(b.text for b, _ in blocks)
+    tool_slots: List[Tuple[Any, Any, str]] = []
+    if isinstance(new_kwargs.get("tools"), list):
+        new_kwargs["tools"] = copy.deepcopy(new_kwargs["tools"])
+        _collect_schema_text(new_kwargs["tools"], ("description", "title"), tool_slots)
+
+    session = component.session(
+        [b.text for b, _ in blocks] + [container[key] for container, key, _ in tool_slots]
+    )
     for block, field in blocks:
         block.text = session.encode(block.text, field)
+    for container, key, field in tool_slots:
+        container[key] = session.encode(container[key], field)
     anchor = session.anchor
     if not anchor:
-        return copies, {}
+        return copies, new_kwargs, {}
 
     if first_target is None:
         copies.insert(0, ChatMessage(role=MessageRole.SYSTEM, content=anchor))
@@ -97,7 +121,7 @@ def _protect_messages(
             text_blocks[index].text = session.decorate(text_blocks[index].text)
         else:
             first_target.blocks.append(TextBlock(text=anchor))
-    return copies, session.mapping
+    return copies, new_kwargs, session.mapping
 
 
 def _restore_chat_response(response: ChatResponse, mapping: Mapping[str, str]) -> ChatResponse:
@@ -200,7 +224,7 @@ async def _async_stream(inner: Any, restorer: Any) -> AsyncGenerator[Any, None]:
 # --------------------------------------------------------------------------- LLM wrapper
 
 
-class ObfusAILLM(LLM):
+class ObfusAILLM(FunctionCallingLLM):
     """Protect any LlamaIndex ``LLM``: obfuscate system prompts, decode replies.
 
     Args:
@@ -236,8 +260,10 @@ class ObfusAILLM(LLM):
 
     # -- helpers
 
-    def _protect_chat(self, messages: Sequence[ChatMessage]) -> Tuple[List[ChatMessage], Mapping[str, str]]:
-        return _protect_messages(self.component, messages, self.roles)
+    def _protect_chat(
+        self, messages: Sequence[ChatMessage], kwargs: Mapping[str, Any]
+    ) -> Tuple[List[ChatMessage], Dict[str, Any], Mapping[str, str]]:
+        return _protect_request(self.component, messages, self.roles, kwargs)
 
     def _protect_prompt(self, prompt: str) -> Tuple[str, Mapping[str, str]]:
         if not self.protect_completions:
@@ -249,28 +275,65 @@ class ObfusAILLM(LLM):
     # -- chat
 
     def chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
-        protected, mapping = self._protect_chat(messages)
+        protected, kwargs, mapping = self._protect_chat(messages, kwargs)
         response = self.llm.chat(protected, **kwargs)
         return _restore_chat_response(response, mapping) if mapping and self.restore_responses else response
 
     async def achat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
-        protected, mapping = self._protect_chat(messages)
+        protected, kwargs, mapping = self._protect_chat(messages, kwargs)
         response = await self.llm.achat(protected, **kwargs)
         return _restore_chat_response(response, mapping) if mapping and self.restore_responses else response
 
     def stream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> Generator[ChatResponse, None, None]:
-        protected, mapping = self._protect_chat(messages)
+        protected, kwargs, mapping = self._protect_chat(messages, kwargs)
         inner = self.llm.stream_chat(protected, **kwargs)
         if not mapping or not self.restore_responses:
             return inner  # type: ignore[no-any-return]
         return _sync_stream(inner, _ChatStreamRestorer(mapping))
 
     async def astream_chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> AsyncGenerator[ChatResponse, None]:
-        protected, mapping = self._protect_chat(messages)
+        protected, kwargs, mapping = self._protect_chat(messages, kwargs)
         inner = await self.llm.astream_chat(protected, **kwargs)
         if not mapping or not self.restore_responses:
             return inner  # type: ignore[no-any-return]
         return _async_stream(inner, _ChatStreamRestorer(mapping))
+
+    # -- function calling (delegated to the wrapped LLM; protection happens in chat/stream_chat)
+
+    def _prepare_chat_with_tools(
+        self,
+        tools: Sequence[Any],
+        user_msg: Optional[Union[str, ChatMessage]] = None,
+        chat_history: Optional[List[ChatMessage]] = None,
+        verbose: bool = False,
+        allow_parallel_tool_calls: bool = False,
+        tool_required: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if not hasattr(self.llm, "_prepare_chat_with_tools_compat"):
+            raise NotImplementedError(f"{type(self.llm).__name__} does not support tool calling")
+        return self.llm._prepare_chat_with_tools_compat(  # type: ignore[no-any-return]
+            tools,
+            user_msg=user_msg,
+            chat_history=chat_history,
+            verbose=verbose,
+            allow_parallel_tool_calls=allow_parallel_tool_calls,
+            tool_required=tool_required,
+            **kwargs,
+        )
+
+    def _validate_chat_with_tools_response(self, response: ChatResponse, tools: Sequence[Any], allow_parallel_tool_calls: bool = False, **kwargs: Any) -> ChatResponse:
+        validate = getattr(self.llm, "_validate_chat_with_tools_response", None)
+        if validate is None:
+            return response
+        return validate(response, tools, allow_parallel_tool_calls=allow_parallel_tool_calls, **kwargs)  # type: ignore[no-any-return]
+
+    def get_tool_calls_from_response(self, response: ChatResponse, error_on_no_tool_call: bool = True, **kwargs: Any) -> List[Any]:
+        if not hasattr(self.llm, "get_tool_calls_from_response"):
+            raise NotImplementedError(f"{type(self.llm).__name__} does not support tool calling")
+        return self.llm.get_tool_calls_from_response(  # type: ignore[no-any-return]
+            response, error_on_no_tool_call=error_on_no_tool_call, **kwargs
+        )
 
     # -- completion
 
