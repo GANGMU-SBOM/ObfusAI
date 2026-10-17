@@ -1,8 +1,8 @@
 # Publishes to PyPI with Trusted Publishing (OIDC): no API token is stored anywhere.
 # PyPI publisher settings: repository GANGMU-SBOM/ObfusAI, workflow "workflows.yml", environment "pypi".
 #
-# Release: bump the version in setup.py (and obfusai/__init__.py), merge, then publish a GitHub
-# release whose tag is v<version> (for example v0.8.0).  The tag must match setup.py.
+# Release: bump __version__ in obfusai/__init__.py (setup.py reads it), merge, then publish a GitHub
+# release whose tag is v<version> (for example v0.9.0).  The tag must match __version__.
 name: Publish to PyPI
 
 on:
@@ -27,10 +27,11 @@ jobs:
           python-version: "3.12"
       - name: Check the release tag matches the package version
         if: github.event_name == 'release'
+        # Read the version straight from the source: a fresh runner has no setuptools to run setup.py.
         run: |
-          version="$(python setup.py --version 2>/dev/null | tail -n 1)"
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match setup.py version v${version}" >&2
+          version="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' obfusai/__init__.py)"
+          if [ -z "${version}" ] || [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match obfusai.__version__ (found: '${version}')" >&2
             exit 1
           fi
       - name: Build sdist and wheel
