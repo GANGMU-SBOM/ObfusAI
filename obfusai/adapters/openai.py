@@ -44,11 +44,12 @@ import inspect
 from typing import Any, AsyncIterator, Iterator, Mapping, Optional
 
 from ..core import ObfusAIComponent
-from ._common import protect_kwargs, restore_attr, restore_json_attr
+from ._common import protect_kwargs
 from ._streams import (
     ChatChunkRestorer,
     ResponsesEventRestorer,
     arestore_events,
+    restore_chat_completion,
     restore_events,
     restore_response_output,
 )
@@ -81,12 +82,7 @@ class _Completions:
             if hasattr(result, "__aiter__"):
                 return arestore_events(result, restorer)
             return restore_events(result, restorer)
-        for choice in getattr(result, "choices", None) or []:
-            message = getattr(choice, "message", None)
-            restore_attr(message, "content", mapping)
-            for tool_call in getattr(message, "tool_calls", None) or []:
-                restore_json_attr(getattr(tool_call, "function", None), "arguments", mapping)
-            restore_json_attr(getattr(message, "function_call", None), "arguments", mapping)  # legacy
+        restore_chat_completion(result, mapping)
         return result
 
 

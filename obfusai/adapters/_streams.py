@@ -21,6 +21,7 @@ __all__ = [
     "ResponsesEventRestorer",
     "arestore_events",
     "restore_events",
+    "restore_chat_completion",
     "restore_message_content",
     "restore_response_output",
 ]
@@ -51,6 +52,16 @@ def restore_response_output(response: Any, mapping: Mapping[str, str]) -> None:
     """Decode output text and ``function_call`` arguments of a Responses API ``response`` object."""
     for item in getattr(response, "output", None) or []:
         restore_response_item(item, mapping)
+
+
+def restore_chat_completion(result: Any, mapping: Mapping[str, str]) -> None:
+    """Decode a Chat Completions response: message text and tool-call arguments."""
+    for choice in getattr(result, "choices", None) or []:
+        message = getattr(choice, "message", None)
+        restore_attr(message, "content", mapping)
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            restore_json_attr(getattr(tool_call, "function", None), "arguments", mapping)
+        restore_json_attr(getattr(message, "function_call", None), "arguments", mapping)  # legacy
 
 
 def restore_response_item(item: Any, mapping: Mapping[str, str]) -> None:

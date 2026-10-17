@@ -213,3 +213,10 @@ def test_broken_baseline_is_never_acceptable() -> None:
     assert report.baseline.pass_rate == 0.0 and not report.acceptable("low")
     broken = evaluate_fidelity(lambda m: 1 / 0, [FidelityCase("x", PROMPT, "u", "BUY")], levels=("low",))
     assert broken.baseline.errors == 1 and "errors" in broken.summary()
+
+
+def test_correct_answers_containing_hidden_values_are_not_counted_as_leaks() -> None:
+    """"HOLD" / "BUY" are hidden by the medium profile, but replying with them is the right answer."""
+    report = evaluate_fidelity(DecodingMockLLM(_desk), CASES, levels=("medium", "high"))
+    assert all(lv.leak_rate == 0.0 for lv in report.levels)
+    assert report.acceptable("medium") and report.acceptable("high")
