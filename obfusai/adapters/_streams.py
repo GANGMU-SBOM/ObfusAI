@@ -16,6 +16,7 @@ from ._common import restore_attr
 
 __all__ = [
     "AnthropicEventRestorer",
+    "MessageStreamEventRestorer",
     "ResponsesEventRestorer",
     "arestore_events",
     "restore_events",
@@ -83,6 +84,89 @@ class AnthropicEventRestorer:
 
     def finish(self) -> List[Any]:
         """Events for text still buffered when the stream ended without closing its blocks."""
+        out: List[Any] = []
+        for index in list(self._restorers):
+            out.extend(self._drain(index))
+        return out
+
+
+class MessageStreamEventRestorer:
+    """Stateful decoder for the events yielded by the SDK's ``messages.stream()`` helper.
+
+    That stream interleaves raw events with derived ones.  After a raw text
+    ``content_block_delta`` the SDK emits a ``text`` event (``text`` = the delta,
+    ``snapshot`` = the accumulated text); here both carry decoded text, and the
+    ``snapshot`` is the decoded text emitted so far.  Just before a block's
+    ``content_block_stop`` a synthetic raw delta plus ``text`` event carry any
+    held-back tail.  ``content_block_stop.content_block`` and the ``message`` of
+    ``message_stop`` are decoded in place (they alias the SDK's own snapshot, so
+    ``get_final_message()`` agrees).  Other event types pass through unchanged.
+    """
+
+    def __init__(self, mapping: Mapping[str, str]) -> None:
+        self.mapping = dict(mapping)
+        self._restorers: Dict[Any, StreamRestorer] = {}
+        self._decoded: Dict[Any, str] = {}
+        self._delta_templates: Dict[Any, Any] = {}
+        self._text_templates: Dict[Any, Any] = {}
+        self._current: Any = None  # (index, decoded piece) of the raw delta just seen
+
+    def _drain(self, index: Any) -> List[Any]:
+        restorer = self._restorers.pop(index, None)
+        delta_tpl = self._delta_templates.pop(index, None)
+        text_tpl = self._text_templates.pop(index, None)
+        decoded = self._decoded.pop(index, "")
+        if restorer is None or delta_tpl is None:
+            return []
+        tail = restorer.flush()
+        if not tail:
+            return []
+        raw = _clone(delta_tpl)
+        raw.delta = _clone(delta_tpl.delta)
+        raw.delta.text = tail
+        out = [raw]
+        if text_tpl is not None:
+            derived = _clone(text_tpl)
+            derived.text = tail
+            derived.snapshot = decoded + tail
+            out.append(derived)
+        return out
+
+    def process(self, event: Any) -> List[Any]:
+        kind = getattr(event, "type", None)
+        out: List[Any] = []
+        if kind == "content_block_delta":
+            delta = getattr(event, "delta", None)
+            if getattr(delta, "type", None) == "text_delta" and isinstance(delta.text, str):
+                restorer = self._restorers.setdefault(event.index, StreamRestorer(self.mapping))
+                piece = restorer.feed(delta.text)
+                self._decoded[event.index] = self._decoded.get(event.index, "") + piece
+                delta.text = piece
+                self._delta_templates[event.index] = event
+                self._current = (event.index, piece)
+        elif kind == "text":
+            if self._current is not None:
+                index, piece = self._current
+                event.text = piece
+                event.snapshot = self._decoded.get(index, "")
+                self._text_templates[index] = event
+            else:  # no raw delta in front of it: decode what we can
+                restore_attr(event, "text", self.mapping)
+                restore_attr(event, "snapshot", self.mapping)
+            self._current = None
+        elif kind == "content_block_stop":
+            out.extend(self._drain(getattr(event, "index", None)))
+            block = getattr(event, "content_block", None)
+            if getattr(block, "type", None) == "text":
+                restore_attr(block, "text", self.mapping)
+        elif kind == "message_stop":
+            for index in list(self._restorers):
+                out.extend(self._drain(index))
+            restore_message_content(getattr(getattr(event, "message", None), "content", None), self.mapping)
+        out.append(event)
+        return out
+
+    def finish(self) -> List[Any]:
         out: List[Any] = []
         for index in list(self._restorers):
             out.extend(self._drain(index))
