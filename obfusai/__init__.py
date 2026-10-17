@@ -2,6 +2,7 @@
 
 from .core import (
     DETECTORS,
+    FieldPolicy,
     Intensity,
     ObfusAIComponent,
     ObfuscatedPayload,
@@ -11,12 +12,13 @@ from .core import (
 )
 from .guard import LeakDetector, LeakReport, StreamRestorer
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "ObfusAIComponent",
     "Intensity",
     "DETECTORS",
+    "FieldPolicy",
     "ObfuscationResult",
     "ObfuscatedPayload",
     "ObfuscationSession",

@@ -160,6 +160,25 @@ ObfusAIComponent(
 )
 ```
 
+### 按字段的策略
+
+请求的不同部分值得区别对待：系统提示词里的专有数字要隐藏，而如果你的模型在工具描述可读时选工具更准，就让工具描述保持原样。
+
+```python
+from obfusai import FieldPolicy
+
+engine = ObfusAIComponent(
+    "high",
+    policies={
+        "system": FieldPolicy(extra_detectors=["emails"], keywords=["Helios"]),  # 仅对该字段追加
+        "tools":  FieldPolicy(skip=True),                                         # 完全不动
+        "*":      FieldPolicy(detectors=["numbers"]),                             # 其他字段的兜底策略
+    },
+)
+```
+
+字段名：消息角色（`system`、`developer`、`user` 等）、`instructions`（Responses API）、`tools`、`documents`（LangChain）、`nodes` / `prompt`（LlamaIndex）。策略里的 `keywords`、`protected`、`rules` 会叠加到组件级设置上；`detectors` 表示替换，`extra_detectors` 表示追加。被跳过的字段保持逐字节不变——锚点也不会写进去（需要时会另外加一条 system 消息）。所有适配器都遵循策略。
+
 ## 守住输出这一侧
 
 ```python
@@ -228,7 +247,7 @@ flowchart LR
 
 ## 路线图
 
-按字段的策略 · 更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
+更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
 
 ## 开发
 

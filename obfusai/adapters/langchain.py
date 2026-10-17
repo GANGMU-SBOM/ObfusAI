@@ -61,7 +61,7 @@ class ObfusAIDocumentTransformer(BaseDocumentTransformer):
     def transform_documents(self, documents: Sequence[Document], **kwargs: Any) -> Sequence[Document]:
         transformed: List[Document] = []
         for doc in documents:
-            result = self.component.obfuscate(doc.page_content)
+            result = self.component.obfuscate(doc.page_content, "documents")
             metadata = dict(doc.metadata)
             metadata["obfusai_session_id"] = result.session_id
             if self.include_anchor:
@@ -138,14 +138,14 @@ class ObfusAIRunnable(Runnable):  # type: ignore[type-arg]
         session = self.component.session(read(i, j) for i, j in slots)
         new_content = {}
         for i, j in slots:
-            new_content[(i, j)] = session.encode(read(i, j))
+            new_content[(i, j)] = session.encode(read(i, j), messages[i].type)
         anchor = session.anchor
 
         updated: List[BaseMessage] = []
         anchored = not anchor
         for i, message in enumerate(messages):
             own = [(k, v) for k, v in new_content.items() if k[0] == i]
-            if not own:
+            if not own or self.component.is_skipped(message.type):
                 updated.append(message)
                 continue
             if isinstance(message.content, str):
