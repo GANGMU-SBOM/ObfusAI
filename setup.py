@@ -1,12 +1,24 @@
+import re
 from pathlib import Path
 
 from setuptools import find_packages, setup
 
-README = Path(__file__).parent / "README.md"
+ROOT = Path(__file__).parent
+README = ROOT / "README.md"
+
+
+def read_version() -> str:
+    """Single source of truth: ``__version__`` in obfusai/__init__.py (read, not imported)."""
+    text = (ROOT / "obfusai" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'^__version__ = "([^"]+)"', text, re.MULTILINE)
+    if not match:
+        raise RuntimeError("obfusai/__init__.py does not define __version__")
+    return match.group(1)
+
 
 setup(
     name="obfusai",
-    version="0.9.0",
+    version=read_version(),
     description="Obfuscate LLM prompts, roles and tool schemas while keeping them executable by LLMs.",
     long_description=README.read_text(encoding="utf-8") if README.exists() else "",
     long_description_content_type="text/markdown",
