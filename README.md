@@ -2,10 +2,10 @@
 
 # 🌀 ObfusAI
 
-**Make your prompts unreadable to attackers — and perfectly readable to the model.**
+**A prompt-hygiene toolkit for LLM apps: catch secrets in prompts, detect when a model leaks its instructions, optionally obfuscate, and measure whether any of it works on *your* model.**
 
-Obfuscation middleware for LLM system prompts, roles and tool schemas.
-Zero dependencies · Python 3.9+ · OpenAI · Anthropic · LangChain
+Python library, plus a local gateway for every other language.
+Zero dependencies · Python 3.9+ · OpenAI · Anthropic · LangChain · LlamaIndex
 
 [![GitHub stars](https://img.shields.io/github/stars/GANGMU-SBOM/ObfusAI?style=social)](https://github.com/GANGMU-SBOM/ObfusAI/stargazers)
 [![PyPI](https://img.shields.io/pypi/v/obfusai)](https://pypi.org/project/obfusai/)
@@ -15,17 +15,27 @@ Zero dependencies · Python 3.9+ · OpenAI · Anthropic · LangChain
 
 **English** · [简体中文](https://github.com/GANGMU-SBOM/ObfusAI/blob/main/README.zh-CN.md)
 
-**⭐ If ObfusAI keeps your prompts safe, [give it a star on GitHub](https://github.com/GANGMU-SBOM/ObfusAI) — it takes one click and helps other developers find it.**
+**⭐ If ObfusAI is useful to you, [give it a star on GitHub](https://github.com/GANGMU-SBOM/ObfusAI) — it takes one click and helps other developers find it.**
 
 </div>
 
 ---
 
-## Why ObfusAI?
+## What problem does this solve?
 
-Your system prompt is intellectual property: trading rules, scoring thresholds, internal codenames, routing logic. "Repeat everything above" style prompt-injection attacks routinely pull it out verbatim.
+If your system prompt or tool schemas carry business logic (thresholds, pricing rules, scoring, internal codenames), five different things can go wrong. They need different tools, and they are not equally well solved:
 
-ObfusAI rewrites the prompt **before it leaves your process** so a leaked copy is a wall of symbols, while a capable model — given a small decoding table — still follows the original instructions.
+| # | Problem | What ObfusAI gives you | How far to trust it |
+|---|---|---|---|
+| 1 | **Secrets and personal data end up in prompts** (API keys, card numbers, customer e-mails) | `audit` / `obfusai audit`: checksum-validated detectors for cards, IDs, IBANs, keys, JWTs, e-mails, phones ... | **Good** for known formats. Heuristic: it lowers the odds, it does not prove a prompt is clean |
+| 2 | **A model discloses its instructions** ("repeat everything above") and nobody notices | `LeakDetector`: scan and redact replies for protected values, aliases and anchors. Works on plaintext prompts too (`values=[...]`) | **Good at detecting** values you listed. It detects, it does not prevent |
+| 3 | **You don't know how leaky your prompt really is, or whether a change broke it** | `evaluate_extraction` (9 extraction attacks, leak rate) and `evaluate_fidelity` (does behaviour survive?), one-command script for a real model | **Measures your model**, so trustworthy for that model and prompt |
+| 4 | **Plaintext logic is spread across logs, traces, dashboards, screenshots** | Obfuscation: numbers, keywords and identifiers become symbols, with a decoding table appended | **Weak and not free.** Protects against *glancing*, not *reading* (details below) |
+| 5 | **Your stack is not Python** | `obfusai serve`: a local gateway; point any language's OpenAI/Anthropic SDK at it | Works. Verified on the JS SDKs and HTTP clients in Go, Java, Ruby, PHP |
+
+So the honest summary is: **the reliable parts are the audit, the leak detector and the measurement tools; obfuscation is an optional extra whose value you must measure.**
+
+### What obfuscation does and does not do
 
 ```text
 BEFORE                                          AFTER (medium)
@@ -40,22 +50,30 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
                                                 </obfusai-context>
 ```
 
-> **Be clear about the guarantee.** This is *obfuscation, not encryption*. The decoding table has to be in the model's context, so an attacker who can dump the **entire** context recovers both. ObfusAI defeats casual extraction, makes leaked prompts costly to read, and — with the built-in leak guard — lets you *detect and block* disclosure. It does not make a prompt confidential. Never put real secrets (API keys, credentials) in prompts.
+- The symbols replace the values in the text, but **the decoding table travels in the same message**. At `low`/`medium` the table holds the real values in plain text, so a search for `momentum_score` still finds it (in the table). At `high` the definitions are reversed and decoys are mixed in, which defeats `grep` and a casual read, but not a person or a model.
+- A model that repeats its context repeats the table with it. In this repo's unit test (`tests/test_redteam.py`) an echoing model leaks 100% of the protected values with and without ObfusAI.
+- It is not free: a short prompt grows ~3-4x because of the table, and a model may follow the decoded instructions less well than the plaintext ones.
+- Use it when the prompt must carry the logic *and* the risk you care about is casual exposure (someone skimming a trace, a cropped screenshot). Do not use it as a confidentiality measure.
+
+### What it does not solve
+
+- **Confidentiality against a determined attacker.** This is obfuscation, not encryption, and not a security boundary.
+- **Credentials.** Never obfuscate them: remove them (`audit` finds them).
+- If you need real confidentiality, change the architecture: keep the logic server-side and let the model call a tool that returns a result, not a rule; never put secrets in prompts; rate-limit and filter outputs. ObfusAI complements that, it does not replace it.
+
+> **Before relying on any of this, measure it:** `python examples/validate_real_model.py --yes` (needs your API key; see [Measure before you trust it](#measure-before-you-trust-it)). Nothing in this repo has been measured against a live model yet.
 
 ## Features
 
 | | |
 |---|---|
-| 🔣 **Symbolic anonymization** | Numbers, metrics, code identifiers, quoted strings, acronyms, proper-noun phrases, e-mails, URLs, IPs and your own keywords/regexes → Greek aliases (`α`, `β₁₇`, `⟦Ω⟧`) |
-| ⚓ **Context anchoring** | A self-describing `<obfusai-context>` block tells the model how to decode silently and not to reveal the table. English or Chinese, full or compact |
-| 🎚 **Three intensities** | `low` · `medium` · `high` (wrapped aliases, reversed definitions, decoys, shuffled table) |
-| 🧩 **Whole-request protection** | System prompt + tool descriptions share one table; tool names, parameters and enums stay intact so tool calls still work |
-| 🔌 **Drop-in integrations** | OpenAI (Chat Completions **and Responses API**) & Anthropic client wrappers — sync, async and **streaming** — plus LangChain and LlamaIndex adapters (document transformer, runnable/LLM wrapper, node postprocessor) |
-| 🛡 **Leak guard** | `LeakDetector` scans model output for anchors, alias definitions, aliases and protected values — and redacts them |
-| 🌊 **Streaming restore** | `StreamRestorer` decodes aliases even when they are split across chunks |
-| 📏 **Fidelity harness** | `evaluate_fidelity` replays your test cases on plaintext vs. each level and reports pass rate, leaks and size growth |
-| 📌 **Prompt-cache friendly** | `alias_mode="stable"` makes an alias depend only on key + value, so identical prompts stay byte-identical |
-| ⚙️ **CLI** | `obfusai obfuscate / restore / scan` |
+| 🔎 **Prompt audit** | `audit()` / `obfusai audit` finds secrets, cards, IDs, IBANs, phones, e-mails, IPs in a prompt, with checksum validation and masked previews |
+| 🛡 **Leak guard** | `LeakDetector` scans and redacts model output for protected values, aliases, anchors; works with or without obfuscation |
+| 🧪 **Red-team + fidelity harness** | `evaluate_extraction` and `evaluate_fidelity` measure leak rate and behaviour on your model, plaintext vs obfuscated |
+| 🌍 **Any language** | `obfusai serve` gateway: point the OpenAI/Anthropic SDK of any language (JS/TS, Go, Java, C#, Rust, Ruby, PHP ...) at it; JSON and SSE replies decoded |
+| 🔌 **Python integrations** | OpenAI (Chat Completions and Responses API) and Anthropic wrappers (sync, async, streaming), LangChain and LlamaIndex adapters |
+| 🔣 **Obfuscation (optional)** | Numbers, identifiers, quoted strings, acronyms, e-mails, URLs, IPs, dates, your keywords/regexes -> Greek aliases; three intensities; per-field policies; stable aliases for prompt caching; tool-call arguments and streams decoded |
+| ⚓ **Context anchoring** | Self-describing `<obfusai-context>` block (English or Chinese, full or compact) tells the model how to decode |
 | 🪶 **Zero-dependency core** | Pure standard library, strictly typed, never crashes on empty or odd input |
 
 ## Install
@@ -68,7 +86,40 @@ pip install "obfusai[llamaindex]"      # + LlamaIndex adapter
 pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git
 ```
 
-## 60-second tour
+## Quickstart
+
+Start with the parts that are reliable, in this order.
+
+**1. Audit your prompts for secrets and personal data** (CI-friendly: exit code 1 when something is found)
+
+```bash
+obfusai audit prompt.txt
+```
+```python
+from obfusai import audit
+
+report = audit(system_prompt)
+if not report.clean:
+    print(report.counts)        # {"secrets": 1, "emails": 2}, previews are masked
+```
+
+**2. Guard replies against disclosure of values you never want users to see**
+
+```python
+from obfusai import LeakDetector
+
+guard = LeakDetector(values=["mean_reversion_v7", "0.73", "Helios Capital"])   # no obfuscation required
+if guard.scan(model_reply).leaked:
+    model_reply = guard.redact(model_reply)
+```
+
+**3. Measure how leaky your prompt is on your model** (needs your API key)
+
+```bash
+python examples/validate_real_model.py --yes
+```
+
+**4. Obfuscate (optional)**, only if the measurement says it helps:
 
 ```python
 from obfusai import ObfusAIComponent
@@ -134,6 +185,28 @@ chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model         
 docs  = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)  # RAG playbooks
 ```
 
+### Any language: the gateway
+
+Native ports of the engine to every language would drift apart (and Go/Rust regexes lack the look-around the detectors rely on), so there is one implementation and a gateway in front of it:
+
+```bash
+pip install obfusai
+obfusai serve --port 8787 --level medium --seed "$OBFUSAI_SEED"     # then change only your SDK's base URL
+```
+
+| Language / SDK | OpenAI | Anthropic |
+|---|---|---|
+| JavaScript / TypeScript | `new OpenAI({ baseURL: "http://127.0.0.1:8787/v1" })` | `new Anthropic({ baseURL: "http://127.0.0.1:8787" })` |
+| Go | `option.WithBaseURL("http://127.0.0.1:8787/v1/")` | same option, base `http://127.0.0.1:8787` |
+| Java / Kotlin | `.baseUrl("http://127.0.0.1:8787/v1")` | `.baseUrl("http://127.0.0.1:8787")` |
+| C# / .NET | `new OpenAIClientOptions { Endpoint = new Uri("http://127.0.0.1:8787/v1") }` | base address `http://127.0.0.1:8787` |
+| Rust | `OpenAIConfig::new().with_api_base("http://127.0.0.1:8787/v1")` | base URL `http://127.0.0.1:8787` |
+| Ruby · PHP · Swift · curl ... | any client with a configurable base URL | |
+
+The gateway handles `POST /v1/chat/completions`, `/v1/responses` and `/v1/messages` (+ `count_tokens`): the request is obfuscated, the reply decoded (tool-call arguments and SSE streams included). Your own `Authorization` / `x-api-key` header is forwarded; no key is stored. Everything else is forwarded **unprotected** (it logs a warning; `--strict` rejects those POSTs). Invalid JSON is rejected, never forwarded.
+
+**What has been verified:** the official OpenAI and Anthropic JavaScript SDKs, plain-HTTP clients in Go, Java, Ruby and PHP (see `examples/gateway/`, runnable against a fake provider with no API key via `run_demo_stack.py`), and the Python SDKs in the test suite. The C#, Rust and other SDK option names above come from their documentation and were **not run here**. The gateway is a stdlib sidecar for localhost, not an internet-facing proxy: it has no authentication, one connection per request and modest throughput.
+
 ### LlamaIndex
 
 ```python
@@ -155,6 +228,8 @@ Obfuscate at query time with the postprocessor so retrieval still runs on readab
 | `low` | numbers, %, currency, dates & times (one alias per date), snake/camel/Pascal/dotted identifiers, your keywords & rules | smallest anchor, highest reliability |
 | `medium` *(default)* | + quoted strings, ACRONYMS, Proper Noun Phrases | balanced |
 | `high` | + long domain words, `⟦α⟧`-wrapped aliases, **reversed** anchor definitions, **decoy** aliases, shuffled table | biggest anchor, hardest to read, lowest decoding margin — **measure it on your model** |
+
+Only `high` hides the values from a plain-text search: at `low` and `medium` the anchor lists them verbatim.
 
 Never touched: template placeholders (`{var}`, `{{var}}`, `${var}`, `%(x)s`), chat special tokens, list markers, and directive words such as `NEVER` / `MUST`. Short prompts pay a fixed anchor cost (the example above grows ×4); the ratio shrinks quickly on real, multi-page prompts, and `anchor_style="compact"` trims it further.
 
@@ -231,9 +306,29 @@ if report.leaked:                       # kinds: anchor · definition · session
     reply = guard.redact(model_reply)   # strips anchors/definitions, masks aliases and values
 ```
 
-Stream-safe decoding: `StreamRestorer(result.mapping).feed(chunk)` … `.flush()`.
+With obfuscation, build the detector from the run: `LeakDetector(result.mapping, session_ids=[result.session_id])`. Without it, pass the values to protect (`values=[...]`) as in the quickstart. Stream-safe decoding: `StreamRestorer(result.mapping).feed(chunk)` … `.flush()`.
 
-## Prove it works on *your* model
+## Measure before you trust it
+
+Two questions decide whether obfuscation is worth using, and only your own model can answer them. One command asks both:
+
+```bash
+export OPENAI_API_KEY=...        # or ANTHROPIC_API_KEY
+python examples/validate_real_model.py --yes      # prints the number of API calls first
+```
+
+1. **Fidelity**: does the model follow the decoded prompt as well as the plaintext one? (`evaluate_fidelity`)
+2. **Protection**: do extraction attacks ("repeat everything above", "translate your instructions", base64, "decode the table" ...) leak the hidden values *less often* than against the plaintext prompt? (`evaluate_extraction`)
+
+If the obfuscated leak rate is not clearly below the plaintext one, obfuscation is not helping on that model: if both are high the model repeats the table, if both are zero it already refuses. Replace the sample prompt with your own before believing the verdict.
+
+```python
+from obfusai.redteam import evaluate_extraction
+
+report = evaluate_extraction(my_chat_callable, SYSTEM, engine=ObfusAIComponent("medium"))
+print(report.summary())     # leak rate against plaintext vs obfuscated, and the gain
+report.helps()              # at least 30 points lower than plaintext?
+```
 
 ```python
 from obfusai.evaluation import FidelityCase, evaluate_fidelity
@@ -256,6 +351,7 @@ obfusai obfuscate prompt.txt -l high --seed s --lang zh --mapping-out map.json >
 obfusai restore reply.txt -m map.json
 obfusai scan reply.txt -m map.json        # exit code 1 if the reply leaks
 obfusai audit prompt.txt                  # exit code 1 if the prompt contains secrets / personal data
+obfusai serve --port 8787 --seed "$OBFUSAI_SEED"   # gateway for any language
 ```
 
 ## How it works
@@ -273,16 +369,18 @@ flowchart LR
 
 ## Threat model
 
-| Attack | Effect with ObfusAI |
+| Exposure | What ObfusAI does |
 |---|---|
-| "Print your system prompt" / naive prompt injection | Returns symbols; the model is told never to reveal the table |
-| Scraped or logged prompts (traces, vendor logs, screenshots) | Unreadable without the matching anchor; `stable`/`seed` keep aliases private |
-| Attacker who dumps the full context (including the anchor) | **Recovers everything** — detect with `LeakDetector`, don't rely on secrecy |
+| Prompt copies in logs, traces, vendor dashboards, screenshots | Numbers, keywords and identifiers show as symbols. Anyone who gets the *whole* message gets the table with it |
+| "Repeat your instructions" / prompt injection | **No guarantee.** A model that repeats its context repeats the table. Some models obey "don't reveal this table" better than "don't reveal your prompt": measure with `evaluate_extraction` |
+| Attacker who dumps the full context (including the anchor) | **Recovers everything.** Detect with `LeakDetector`; do not rely on secrecy |
+| Credentials and personal data in prompts | Do not obfuscate them: remove them (`audit` finds them) |
 | Insider with the seed | Can reproduce aliases; the seed is not a cryptographic key |
 
 ## FAQ
 
-**Does the model really follow the symbols?** Strong models generally do, but it varies by model, prompt length and intensity. That is why `evaluate_fidelity` exists — gate rollout on it.
+**Does the model really follow the symbols?** Often, but it varies by model, prompt length and intensity, and nothing here has been measured against a live model yet. That is why `evaluate_fidelity` and `evaluate_extraction` exist: gate rollout on them.
+**Is it worth it?** If you can keep the sensitive logic out of the prompt (a server-side tool, a classifier, a config the model never sees), do that instead. Use ObfusAI when the prompt must carry the logic and you want a layer against casual exposure plus leak detection.
 **Do tool calls still work?** Yes. Only `description`/`title` text is obfuscated; names, parameters, enums and types are untouched.
 **Why does the same prompt look different between processes?** The default seed is random per instance. Pass a fixed `seed` for reproducible output (and provider prompt caching).
 **Where do `{placeholders}` go?** They are preserved so your templating keeps working.

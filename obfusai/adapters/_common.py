@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from ..core import ObfusAIComponent
+from ..guard import restore_json_text
 
 #: Request fields that carry prompt text; everything else is forwarded untouched.
 PROMPT_FIELDS = ("messages", "tools", "system", "instructions", "input", "text", "response_format")
@@ -32,3 +33,10 @@ def restore_attr(obj: Any, name: str, mapping: Mapping[str, str]) -> None:
     value: Optional[Any] = getattr(obj, name, None)
     if isinstance(value, str) and value:
         setattr(obj, name, ObfusAIComponent.deobfuscate(value, mapping))
+
+
+def restore_json_attr(obj: Any, name: str, mapping: Mapping[str, str]) -> None:
+    """Decode aliases in ``obj.<name>`` in place when it is JSON text (tool-call arguments)."""
+    value: Optional[Any] = getattr(obj, name, None)
+    if isinstance(value, str) and value:
+        setattr(obj, name, restore_json_text(value, mapping))

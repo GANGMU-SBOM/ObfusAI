@@ -19,7 +19,7 @@ def read_version() -> str:
 setup(
     name="obfusai",
     version=read_version(),
-    description="Obfuscate LLM prompts, roles and tool schemas while keeping them executable by LLMs.",
+    description="Prompt-hygiene toolkit for LLM apps: audit prompts for secrets, detect and measure prompt leaks, optionally obfuscate; any language via a local gateway.",
     long_description=README.read_text(encoding="utf-8") if README.exists() else "",
     long_description_content_type="text/markdown",
     packages=find_packages(exclude=("tests", "tests.*", "examples")),
@@ -29,7 +29,7 @@ setup(
         "Source": "https://github.com/GANGMU-SBOM/ObfusAI",
         "Issues": "https://github.com/GANGMU-SBOM/ObfusAI/issues",
     },
-    keywords=["llm", "prompt", "obfuscation", "prompt-injection", "security", "openai", "anthropic", "langchain", "llamaindex"],
+    keywords=["llm", "prompt", "prompt-leak", "prompt-injection", "pii", "secrets", "audit", "obfuscation", "gateway", "openai", "anthropic", "langchain", "llamaindex"],
     license="MIT",
     python_requires=">=3.9",
     install_requires=[],

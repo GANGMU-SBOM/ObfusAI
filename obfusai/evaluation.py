@@ -156,7 +156,9 @@ def evaluate_fidelity(
 
         def build(case: FidelityCase) -> Tuple[Dict[str, Any], LeakDetector]:
             result = engine.obfuscate_payload(request(case))
-            return result.payload, LeakDetector(result.mapping, session_ids=[result.session_id])
+            # structural leaks only (anchor, definitions, aliases, session id): a *correct* answer
+            # often contains a hidden value ("HOLD", "8.2%"), which is not a leak in a fidelity test
+            return result.payload, LeakDetector(result.mapping, session_ids=[result.session_id], check_values=False)
 
         return build
 

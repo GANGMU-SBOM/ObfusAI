@@ -12,14 +12,17 @@ Requires ``langchain-core`` (``pip install obfusai[langchain]``).
 
 * :class:`ObfusAIProtectedModel` - wraps a chat model so the whole round trip
   (obfuscate the request, call the model, decode aliases in the reply, also
-  while streaming) happens in one thread-safe step::
+  while streaming) happens in one thread-safe step.  Aliases in tool-call
+  arguments (``tool_calls``, ``invalid_tool_calls`` and OpenAI-style
+  ``additional_kwargs['tool_calls']``) are decoded for ``invoke``; streamed
+  ``tool_call_chunks`` are not::
 
       chain = prompt | ObfusAIProtectedModel(chat_model, ObfusAIComponent("high"))
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:
     from langchain_core.documents import BaseDocumentTransformer, Document
@@ -37,7 +40,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without langchai
     ) from exc
 
 from ..core import ObfusAIComponent
-from ..guard import StreamRestorer
+from ..guard import StreamRestorer, restore_json_text, restore_json_value
 
 __all__ = ["ObfusAIDocumentTransformer", "ObfusAIProtectedModel", "ObfusAIRunnable"]
 
@@ -196,9 +199,40 @@ def _restore_content(content: Any, mapping: Mapping[str, str]) -> Any:
     return content
 
 
+def _restore_tool_calls(message: Any, mapping: Mapping[str, str]) -> Dict[str, Any]:
+    """Message fields (beyond ``content``) that carry decoded tool-call arguments."""
+    update: Dict[str, Any] = {}
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        update["tool_calls"] = [
+            {**call, "args": restore_json_value(call.get("args"), mapping)} for call in tool_calls
+        ]
+    invalid = getattr(message, "invalid_tool_calls", None)
+    if invalid:
+        update["invalid_tool_calls"] = [
+            {**call, "args": restore_json_text(call["args"], mapping)}
+            if isinstance(call.get("args"), str)
+            else call
+            for call in invalid
+        ]
+    raw_calls = (getattr(message, "additional_kwargs", None) or {}).get("tool_calls")
+    if isinstance(raw_calls, list):  # OpenAI-style raw tool calls
+        decoded = []
+        for call in raw_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            if isinstance(function, dict) and isinstance(function.get("arguments"), str):
+                call = {**call, "function": {**function, "arguments": restore_json_text(function["arguments"], mapping)}}
+            decoded.append(call)
+        update["additional_kwargs"] = {**message.additional_kwargs, "tool_calls": decoded}
+    return update
+
+
 def _restore_output(output: Any, mapping: Mapping[str, str]) -> Any:
     if isinstance(output, BaseMessage):
-        return _with_content(output, _restore_content(output.content, mapping))
+        update = {"content": _restore_content(output.content, mapping), **_restore_tool_calls(output, mapping)}
+        if hasattr(output, "model_copy"):
+            return output.model_copy(update=update)
+        return output.copy(update=update)  # pragma: no cover - legacy langchain-core
     if isinstance(output, str):
         return ObfusAIComponent.deobfuscate(output, mapping)
     return output

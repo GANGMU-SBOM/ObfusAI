@@ -17,8 +17,10 @@ Requires ``llama-index-core`` (``pip install obfusai[llamaindex]``).
   names, parameter names and enums are left untouched; the ``description`` / ``title``
   text of dict-based tool schemas (OpenAI, Anthropic, Mistral and similar providers)
   is obfuscated with the same alias table as the system prompt.  Providers that pass
-  tool specs as non-dict objects are forwarded unchanged.  Aliases inside the model's
-  tool-call arguments are not decoded.
+  tool specs as non-dict objects are forwarded unchanged.  Aliases the model writes
+  into tool-call arguments are decoded in non-streaming responses (``ToolCallBlock``
+  kwargs and OpenAI-style ``additional_kwargs['tool_calls']``), so
+  ``get_tool_calls_from_response`` returns real values; streamed tool-call chunks are not decoded.
 
 * :class:`ObfusAINodePostprocessor` - obfuscates retrieved nodes right before they
   are placed into the prompt, so retrieval itself still runs on readable text::
@@ -64,7 +66,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without llama-in
     ) from exc
 
 from ..core import ObfusAIComponent, _collect_schema_text
-from ..guard import StreamRestorer
+from ..guard import StreamRestorer, restore_json_text, restore_json_value
 
 __all__ = ["ObfusAILLM", "ObfusAINodePostprocessor", "ObfusAITransform"]
 
@@ -124,7 +126,28 @@ def _protect_request(
     return copies, new_kwargs, session.mapping
 
 
+def _restore_tool_calls(message: ChatMessage, mapping: Mapping[str, str]) -> None:
+    """Decode aliases in tool-call arguments so ``get_tool_calls_from_response`` returns real values."""
+    for block in message.blocks:
+        if getattr(block, "block_type", None) == "tool_call":
+            kwargs = getattr(block, "tool_kwargs", None)
+            if isinstance(kwargs, str):
+                block.tool_kwargs = restore_json_text(kwargs, mapping)
+            elif kwargs:
+                block.tool_kwargs = restore_json_value(kwargs, mapping)
+    for call in message.additional_kwargs.get("tool_calls") or []:  # OpenAI-style raw tool calls
+        holder = call.get("function") if isinstance(call, dict) else getattr(call, "function", None)
+        arguments = holder.get("arguments") if isinstance(holder, dict) else getattr(holder, "arguments", None)
+        if isinstance(arguments, str):
+            decoded = restore_json_text(arguments, mapping)
+            if isinstance(holder, dict):
+                holder["arguments"] = decoded
+            else:
+                holder.arguments = decoded
+
+
 def _restore_chat_response(response: ChatResponse, mapping: Mapping[str, str]) -> ChatResponse:
+    _restore_tool_calls(response.message, mapping)
     for block in response.message.blocks:
         if getattr(block, "block_type", None) == "text":
             block.text = ObfusAIComponent.deobfuscate(block.text, mapping)

@@ -1,4 +1,4 @@
-"""ObfusAI: prompt, role and tool-schema obfuscation middleware for LLM applications."""
+"""ObfusAI: prompt hygiene for LLM apps: audit, leak detection, measurement and optional obfuscation."""
 
 from .core import (
     DETECTORS,
@@ -13,7 +13,7 @@ from .core import (
 from .audit import AuditFinding, AuditReport, audit
 from .guard import LeakDetector, LeakReport, StreamRestorer
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     "ObfusAIComponent",
