@@ -1,75 +1,218 @@
-# ObfusAI
+<div align="center">
 
-Middleware that obfuscates sensitive LLM prompts, system roles and tool schemas so a leaked
-prompt is hard for a human to read, while capable LLMs (GPT-4o, Claude, ...) can still follow it.
+# 🌀 ObfusAI
 
-ObfusAI replaces proprietary numbers, metrics, keywords and code identifiers with abstract Greek
-symbols (`momentum_score > 0.73` becomes `η > χ`) and attaches a *semantic anchor*: an
-`<obfusai-context>` block holding the alias table plus instructions to decode it silently.
+**Make your prompts unreadable to attackers — and perfectly readable to the model.**
 
-> **Security model.** This is obfuscation, not encryption. The anchor travels in the same context
-> window as the obfuscated text, so an attacker who can make the model dump its whole context
-> recovers both. ObfusAI defeats casual extraction ("repeat your system prompt") and makes leaked
-> prompts costly to read; it does not make a prompt confidential. Keep real secrets (API keys,
-> credentials) out of prompts regardless.
+Obfuscation middleware for LLM system prompts, roles and tool schemas.
+Zero dependencies · Python 3.9+ · OpenAI · Anthropic · LangChain
+
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![dependencies](https://img.shields.io/badge/core%20dependencies-0-brightgreen)
+
+**English** · [简体中文](README.zh-CN.md)
+
+</div>
+
+---
+
+## Why ObfusAI?
+
+Your system prompt is intellectual property: trading rules, scoring thresholds, internal codenames, routing logic. "Repeat everything above" style prompt-injection attacks routinely pull it out verbatim.
+
+ObfusAI rewrites the prompt **before it leaves your process** so a leaked copy is a wall of symbols, while a capable model — given a small decoding table — still follows the original instructions.
+
+```text
+BEFORE                                          AFTER (medium)
+You are the Alpha Momentum Engine for           You are the λ for τ.
+Helios Capital.                                 Signal "π": Ψ when δ > ξ and Θ <= θ.
+Signal "mean_reversion_v7": BUY when            Never exceed φ of Ξ. Hard stop: β = μ.
+momentum_score > 0.73 and risk_budget_bps <= 45.
+Never exceed 2.5% of NAV.                       <obfusai-context v="1" id="2d5d5ff8">
+Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
+                                                λ = "Alpha Momentum Engine"
+                                                δ = "momentum_score"   ξ = "0.73"   ...
+                                                </obfusai-context>
+```
+
+> **Be clear about the guarantee.** This is *obfuscation, not encryption*. The decoding table has to be in the model's context, so an attacker who can dump the **entire** context recovers both. ObfusAI defeats casual extraction, makes leaked prompts costly to read, and — with the built-in leak guard — lets you *detect and block* disclosure. It does not make a prompt confidential. Never put real secrets (API keys, credentials) in prompts.
+
+## Features
+
+| | |
+|---|---|
+| 🔣 **Symbolic anonymization** | Numbers, metrics, code identifiers, quoted strings, acronyms, proper-noun phrases, e-mails, URLs, IPs and your own keywords/regexes → Greek aliases (`α`, `β₁₇`, `⟦Ω⟧`) |
+| ⚓ **Context anchoring** | A self-describing `<obfusai-context>` block tells the model how to decode silently and not to reveal the table. English or Chinese, full or compact |
+| 🎚 **Three intensities** | `low` · `medium` · `high` (wrapped aliases, reversed definitions, decoys, shuffled table) |
+| 🧩 **Whole-request protection** | System prompt + tool descriptions share one table; tool names, parameters and enums stay intact so tool calls still work |
+| 🔌 **Drop-in integrations** | OpenAI & Anthropic client wrappers (sync/async), LangChain transformer, runnable and model wrapper |
+| 🛡 **Leak guard** | `LeakDetector` scans model output for anchors, alias definitions, aliases and protected values — and redacts them |
+| 🌊 **Streaming restore** | `StreamRestorer` decodes aliases even when they are split across chunks |
+| 📏 **Fidelity harness** | `evaluate_fidelity` replays your test cases on plaintext vs. each level and reports pass rate, leaks and size growth |
+| 📌 **Prompt-cache friendly** | `alias_mode="stable"` makes an alias depend only on key + value, so identical prompts stay byte-identical |
+| ⚙️ **CLI** | `obfusai obfuscate / restore / scan` |
+| 🪶 **Zero-dependency core** | Pure standard library, strictly typed, never crashes on empty or odd input |
 
 ## Install
 
 ```bash
-pip install .                 # zero-dependency core, Python 3.9+
-pip install ".[langchain]"    # plus the LangChain adapter
+pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git            # core, no dependencies
+pip install "obfusai[langchain] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"   # + LangChain adapter
 ```
 
-## Usage
+## 60-second tour
 
 ```python
 from obfusai import ObfusAIComponent
 
 engine = ObfusAIComponent("medium", seed="my-secret", keywords=["Helios Capital"])
 
-result = engine.obfuscate("If momentum_score > 0.73 then BUY. Cap size at 2.5% of NAV.")
-print(result.prompt)                  # obfuscated text + anchor, ready for the system role
-print(result.restore("η cleared"))    # decode aliases in a model reply
-
-# A whole chat-completion request (OpenAI or Anthropic shape): one shared alias table,
-# anchor attached to the system prompt, tool names/parameters/enums left intact.
-protected = engine.obfuscate_payload(request_payload)
-client.chat.completions.create(**protected.payload)
+result = engine.obfuscate(system_prompt)
+result.prompt                       # obfuscated text + anchor → send as the system message
+result.restore("η is the driver")   # decode aliases in a reply
+result.stats.growth                 # output size ÷ source size
 ```
 
-Run `python examples/basic_usage.py` for a full demo against a mock LLM.
+### Protect a whole chat request
 
-### Intensity
+```python
+protected = engine.obfuscate_payload({
+    "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": q}],
+    "tools": TOOLS,
+})
+client.chat.completions.create(model="gpt-4o", **protected.payload)
+```
 
-| Level    | Obfuscated                                                                 | Notes |
-|----------|----------------------------------------------------------------------------|-------|
-| `low`    | numbers/percentages/currency, snake/camel/Pascal/dotted identifiers, `keywords` | smallest anchor, highest reliability |
-| `medium` | + quoted strings, acronyms, proper-noun phrases                            | default |
-| `high`   | + long domain words, `⟦α⟧`-wrapped aliases, reversed anchor definitions, decoy aliases, shuffled table | larger anchor, slightly lower decoding reliability; test on your model |
+### Or wrap your SDK client
 
-Left untouched at every level: template placeholders (`{var}`, `{{var}}`, `${var}`, `%(var)s`),
-chat special tokens, list markers, and directive words such as `NEVER`/`MUST`.
+```python
+from openai import OpenAI
+from obfusai.adapters.openai import ObfusAIOpenAI
 
-Notes: pass a fixed `seed` for byte-identical output (provider prompt caching); the default is a
-random per-instance seed. Empty or `None` input returns an empty result; text with nothing to hide
-passes through with no anchor. Non-string input raises `TypeError`.
+client = ObfusAIOpenAI(OpenAI(), ObfusAIComponent("high", seed="my-secret"))
+reply = client.chat.completions.create(model="gpt-4o", messages=[...], tools=[...])   # streaming works too
+```
+
+```python
+from anthropic import Anthropic
+from obfusai.adapters.anthropic import ObfusAIAnthropic
+
+client = ObfusAIAnthropic(Anthropic(), ObfusAIComponent("medium", seed="my-secret"))
+reply = client.messages.create(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512)
+```
 
 ### LangChain
 
 ```python
-from obfusai import ObfusAIComponent
-from obfusai.adapters.langchain import ObfusAIDocumentTransformer, ObfusAIRunnable
+from obfusai.adapters.langchain import ObfusAIDocumentTransformer, ObfusAIProtectedModel, ObfusAIRunnable
 
-chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model
-docs = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)
+chain = prompt | ObfusAIProtectedModel(chat_model, ObfusAIComponent("high"))   # obfuscate → call → decode (+ streaming)
+chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model         # obfuscate only
+docs  = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)  # RAG playbooks
 ```
+
+## Intensity levels
+
+| Level | Obfuscates | Trade-off |
+|---|---|---|
+| `low` | numbers, %, currency, snake/camel/Pascal/dotted identifiers, your keywords & rules | smallest anchor, highest reliability |
+| `medium` *(default)* | + quoted strings, ACRONYMS, Proper Noun Phrases | balanced |
+| `high` | + long domain words, `⟦α⟧`-wrapped aliases, **reversed** anchor definitions, **decoy** aliases, shuffled table | biggest anchor, hardest to read, lowest decoding margin — **measure it on your model** |
+
+Never touched: template placeholders (`{var}`, `{{var}}`, `${var}`, `%(x)s`), chat special tokens, list markers, and directive words such as `NEVER` / `MUST`. Short prompts pay a fixed anchor cost (the example above grows ×4); the ratio shrinks quickly on real, multi-page prompts, and `anchor_style="compact"` trims it further.
+
+## Tune what gets hidden
+
+```python
+ObfusAIComponent(
+    "medium",
+    keywords=["Helios"],                       # always hide (case-insensitive)
+    protected=["JSON"],                        # never hide
+    rules=[r"ACME-\d{4}", r"project (\w+)"],   # your regexes (capture groups → only the group)
+    extra_detectors=["emails", "urls", "ips"], # opt-in detectors; see obfusai.DETECTORS
+    alias_mode="stable",                       # same value → same alias in every prompt
+    anchor_language="zh", anchor_style="compact",
+)
+```
+
+## Guard the output
+
+```python
+from obfusai import LeakDetector
+
+guard = LeakDetector(result.mapping, session_ids=[result.session_id])
+report = guard.scan(model_reply)
+if report.leaked:                       # kinds: anchor · definition · session · alias · value
+    reply = guard.redact(model_reply)   # strips anchors/definitions, masks aliases and values
+```
+
+Stream-safe decoding: `StreamRestorer(result.mapping).feed(chunk)` … `.flush()`.
+
+## Prove it works on *your* model
+
+```python
+from obfusai.evaluation import FidelityCase, evaluate_fidelity
+
+report = evaluate_fidelity(
+    my_chat_callable,                                    # messages -> reply text
+    [FidelityCase("buy", SYSTEM, "edge_bps=40", "BUY")],
+    levels=("low", "medium", "high"), repeats=3,
+)
+print(report.summary())
+report.acceptable("high")   # same pass rate as plaintext and no leaks?
+```
+
+`obfusai.testing.DecodingMockLLM` is a deterministic stand-in that decodes the anchor, handy for unit tests.
+
+## CLI
+
+```bash
+obfusai obfuscate prompt.txt -l high --seed s --lang zh --mapping-out map.json > protected.txt
+obfusai restore reply.txt -m map.json
+obfusai scan reply.txt -m map.json        # exit code 1 if the reply leaks
+```
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Plain prompt + tool schemas] --> B[Detectors<br/>numbers · identifiers · terms · rules]
+    B --> C[Shared alias table<br/>Greek symbols]
+    C --> D[Obfuscated text]
+    C --> E[Anchor block<br/>decoding table]
+    D & E --> F[LLM]
+    F --> G[Reply]
+    G --> H[LeakDetector / StreamRestorer]
+```
+
+## Threat model
+
+| Attack | Effect with ObfusAI |
+|---|---|
+| "Print your system prompt" / naive prompt injection | Returns symbols; the model is told never to reveal the table |
+| Scraped or logged prompts (traces, vendor logs, screenshots) | Unreadable without the matching anchor; `stable`/`seed` keep aliases private |
+| Attacker who dumps the full context (including the anchor) | **Recovers everything** — detect with `LeakDetector`, don't rely on secrecy |
+| Insider with the seed | Can reproduce aliases; the seed is not a cryptographic key |
+
+## FAQ
+
+**Does the model really follow the symbols?** Strong models generally do, but it varies by model, prompt length and intensity. That is why `evaluate_fidelity` exists — gate rollout on it.
+**Do tool calls still work?** Yes. Only `description`/`title` text is obfuscated; names, parameters, enums and types are untouched.
+**Why does the same prompt look different between processes?** The default seed is random per instance. Pass a fixed `seed` for reproducible output (and provider prompt caching).
+**Where do `{placeholders}` go?** They are preserved so your templating keeps working.
+
+## Roadmap
+
+OpenAI Responses API wrapper · Anthropic streaming restore · LlamaIndex adapter · per-field policies · richer PII detectors.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]" && pytest
+python examples/basic_usage.py && python examples/advanced_usage.py
 ```
 
 ## License
 
-MIT; see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -2,10 +2,11 @@
 
 Run from the repository root:  python examples/basic_usage.py
 
-The "LLM" below is a deterministic stand-in that behaves like a capable model
-following the anchor: it reads the alias table, substitutes the aliases, and then
-applies the decoded rules.  It re-implements anchor parsing independently of the
-library, so the run shows the anchor format alone is enough to recover the logic.
+The "LLM" below is `obfusai.testing.DecodingMockLLM`, a deterministic stand-in for a
+capable model: it reads the anchor, substitutes the aliases, and then applies rules to
+the *decoded* prompt.  It shows the anchor carries the full logic; it is not a claim
+about how any particular real model behaves (see examples/advanced_usage.py for the
+evaluation harness that measures that).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any, Dict, List
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from obfusai import ObfusAIComponent  # noqa: E402
+from obfusai.testing import DecodingMockLLM  # noqa: E402
 
 SYSTEM_PROMPT = """You are the Alpha Momentum Engine, a desk assistant for Helios Capital.
 Rules for the signal "mean_reversion_v7":
@@ -42,36 +44,23 @@ TOOLS: List[Dict[str, Any]] = [
     }
 ]
 
-ALIAS_LINE = re.compile(r'^(\S+) = "((?:[^"\\]|\\.)*)"$', re.MULTILINE)
+def desk_rules(system: str, user: str) -> str:
+    """The behaviour a model would derive from the *decoded* system prompt."""
+    score = float(re.search(r"momentum_score=([\d.]+)", user).group(1))  # type: ignore[union-attr]
+    risk = float(re.search(r"risk_budget_bps=([\d.]+)", user).group(1))  # type: ignore[union-attr]
+    buy_at = float(re.search(r"momentum_score > ([\d.]+)", system).group(1))  # type: ignore[union-attr]
+    risk_cap = float(re.search(r"risk_budget_bps <= ([\d.]+)", system).group(1))  # type: ignore[union-attr]
+    sell_at = float(re.search(r"momentum_score < ([\d.]+)", system).group(1))  # type: ignore[union-attr]
+    if score > buy_at and risk <= risk_cap:
+        return "BUY - momentum clears the entry threshold within the risk budget."
+    if score < sell_at:
+        return "SELL - momentum is below the exit threshold."
+    return "HOLD - no rule triggered."
 
 
 def mock_chat_completion(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Pretend to be an LLM: decode the anchor, apply the decoded rules to the user message."""
-    system = next(m["content"] for m in payload["messages"] if m["role"] == "system")
-    block = re.search(r"<obfusai-context[^>]*>(.*?)</obfusai-context>", system, re.DOTALL)
-    header_match = re.search(r"<obfusai-context([^>]*)>", system)
-    header = header_match.group(1) if header_match else ""
-    table: Dict[str, str] = {}
-    if block:
-        for alias, value in ALIAS_LINE.findall(block.group(1)):
-            value = value.replace('\\"', '"').replace("\\\\", "\\").replace("\\n", "\n")
-            table[alias] = value[::-1] if 'enc="rev"' in header and value != "∅" else value
-    decoded = system
-    for alias in sorted(table, key=len, reverse=True):
-        decoded = decoded.replace(alias, table[alias])
-
-    user = payload["messages"][-1]["content"]
-    score = float(re.search(r"momentum_score=([\d.]+)", user).group(1))  # type: ignore[union-attr]
-    risk = float(re.search(r"risk_budget_bps=([\d.]+)", user).group(1))  # type: ignore[union-attr]
-    buy_at = float(re.search(r"momentum_score > ([\d.]+)", decoded).group(1))  # type: ignore[union-attr]
-    risk_cap = float(re.search(r"risk_budget_bps <= ([\d.]+)", decoded).group(1))  # type: ignore[union-attr]
-    sell_at = float(re.search(r"momentum_score < ([\d.]+)", decoded).group(1))  # type: ignore[union-attr]
-    if score > buy_at and risk <= risk_cap:
-        answer = "BUY - momentum clears the entry threshold within the risk budget."
-    elif score < sell_at:
-        answer = "SELL - momentum is below the exit threshold."
-    else:
-        answer = "HOLD - no rule triggered."
+    """OpenAI-shaped response from a stand-in model that decodes the anchor first."""
+    answer = DecodingMockLLM(desk_rules)(payload["messages"])
     return {"choices": [{"message": {"role": "assistant", "content": answer}}]}
 
 
