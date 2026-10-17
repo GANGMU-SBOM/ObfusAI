@@ -46,7 +46,7 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
 | ⚓ **上下文锚定** | 自带 `<obfusai-context>` 说明块，指导模型静默解码，并禁止泄露该表。支持中文/英文、完整/精简两种写法 |
 | 🎚 **三档强度** | `low` · `medium` · `high`（高档含包裹式别名、逆序定义、诱饵别名、乱序表） |
 | 🧩 **整个请求一起保护** | 系统提示词与工具描述共用一张别名表；工具名、参数名、枚举值保持不变，工具调用照常工作 |
-| 🔌 **即插即用** | OpenAI / Anthropic 客户端包装器（同步+异步）、LangChain 文档转换器、Runnable 与模型包装器 |
+| 🔌 **即插即用** | OpenAI（Chat Completions **与 Responses API**）和 Anthropic 客户端包装器——同步、异步、**流式**全支持——以及 LangChain 文档转换器、Runnable 与模型包装器 |
 | 🛡 **泄露防护** | `LeakDetector` 扫描模型输出中的锚点、别名定义、别名与受保护原值，并可一键脱敏 |
 | 🌊 **流式还原** | `StreamRestorer` 即使别名被切在两个数据块之间也能正确还原 |
 | 📏 **保真度评测** | `evaluate_fidelity` 在明文与各档位上回放你的测试用例，给出通过率、泄露率与体积膨胀 |
@@ -93,6 +93,8 @@ from obfusai.adapters.openai import ObfusAIOpenAI
 
 client = ObfusAIOpenAI(OpenAI(), ObfusAIComponent("high", seed="my-secret"))
 reply = client.chat.completions.create(model="gpt-4o", messages=[...], tools=[...])   # 流式同样支持
+reply = client.responses.create(model="gpt-4o", instructions=SYSTEM, input="hi", tools=[...])  # Responses API
+print(reply.output_text)                                                              # 已还原
 ```
 
 ```python
@@ -101,7 +103,13 @@ from obfusai.adapters.anthropic import ObfusAIAnthropic
 
 client = ObfusAIAnthropic(Anthropic(), ObfusAIComponent("medium", seed="my-secret"))
 reply = client.messages.create(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512)
+
+with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512) as stream:
+    for text in stream.text_stream:        # 已还原；别名被切在两个事件之间也没问题
+        print(text, end="")
 ```
+
+> 包装器保护 `chat.completions.create`、`responses.create`、`messages.create` 与 `messages.stream`。其他接口（批处理、旧版 completions 等）**不受保护**：未受保护的 `messages.*` 方法会直接报错而不是悄悄发出明文，其他客户端属性则原样转发。
 
 ### LangChain
 
@@ -205,7 +213,7 @@ flowchart LR
 
 ## 路线图
 
-OpenAI Responses API 包装器 · Anthropic 流式还原 · LlamaIndex 适配器 · 按字段的策略 · 更丰富的 PII 检测器。
+LlamaIndex 适配器 · 按字段的策略 · 更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
 
 ## 开发
 

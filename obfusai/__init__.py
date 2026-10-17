@@ -11,7 +11,7 @@ from .core import (
 )
 from .guard import LeakDetector, LeakReport, StreamRestorer
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ObfusAIComponent",
