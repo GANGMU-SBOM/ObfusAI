@@ -32,6 +32,8 @@ If your system prompt or tool schemas carry business logic (thresholds, pricing 
 | 3 | **You don't know how leaky your prompt really is, or whether a change broke it** | `evaluate_extraction` (9 extraction attacks, leak rate) and `evaluate_fidelity` (does behaviour survive?), one-command script for a real model | **Measures your model**, so trustworthy for that model and prompt |
 | 4 | **Plaintext logic is spread across logs, traces, dashboards, screenshots** | Obfuscation: numbers, keywords and identifiers become symbols, with a decoding table appended | **Weak and not free.** Protects against *glancing*, not *reading* (details below) |
 | 5 | **Your stack is not Python** | `obfusai serve`: a local gateway; point any language's OpenAI/Anthropic SDK at it | Works. Verified on the JS SDKs and HTTP clients in Go, Java, Ruby, PHP |
+| 6 | **Skill prompts are stored or shipped as plaintext files** (repo, package, backup, marketplace) | `seal`: AES-256-GCM encryption at rest; the gateway opens sealed prompts server-side, so clients only hold ciphertext | **Real encryption**, but only against people without the key. Whoever runs the prompt, and the model provider, still see plaintext |
+| 7 | **A prompt leaked and you need to know which copy it came from** | `canary`: a unique token per recipient, found again with one call | Evidence, not prevention; an attacker who reads the prompt can strip a token they notice |
 
 So the honest summary is: **the reliable parts are the audit, the leak detector and the measurement tools; obfuscation is an optional extra whose value you must measure.**
 
@@ -63,10 +65,54 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
 
 > **Before relying on any of this, measure it:** `python examples/validate_real_model.py --yes` (needs your API key; see [Measure before you trust it](#measure-before-you-trust-it)). Nothing in this repo has been measured against a live model yet.
 
+## Skill prompts at rest, leak tracing, and distillation
+
+### Keeping skill prompts out of plaintext storage
+
+A model has to receive the plaintext, so a prompt cannot be hidden from the machine that executes it or from the model provider. What you *can* do is keep it encrypted everywhere else (git, packages, backups, build caches, marketplace listings) and decrypt it only where you control the infrastructure:
+
+```bash
+export OBFUSAI_SEAL_KEY="$(obfusai keygen)"                 # keep it in a secret manager, never in the repo
+obfusai seal skills/desk.md --label desk -o skills/desk.sealed   # one URL-safe line, safe to commit and ship
+obfusai serve --port 8787                                    # the gateway holds the key
+# clients send the sealed line instead of the prompt; the gateway decrypts, obfuscates, forwards
+```
+```python
+from obfusai.seal import seal, unseal            # pip install "obfusai[seal]"
+
+blob = seal(prompt, key=key, label="desk")       # AES-256-GCM; the label is authenticated (blobs cannot be swapped)
+prompt = unseal(blob, key=key, expect_label="desk")   # in-process, just before the call
+```
+
+If you distribute a skill that runs **on the customer's machine with their own API key**, they can always read it (they can inspect the request), and no encryption changes that. The architecture that works is to keep execution, and the key, on your side: customers call your service, and only ciphertext (or just a skill name) ever leaves it. Without the key, the gateway rejects requests that carry a sealed blob; it never forwards one.
+
+### Tracing which copy leaked
+
+```python
+from obfusai.canary import embed_canaries, find_recipients
+
+copy = embed_canaries(prompt, "acme-corp", secret, count=3)      # a unique token per recipient, spread through the text
+find_recipients(leaked_text, ["acme-corp", "globex"], secret)    # -> ["acme-corp"], no database needed
+```
+
+Use it on a leaked prompt, or on a suspect product's reply to an extraction attempt. It is evidence, not prevention: a reader can strip tokens they notice, and comparing two copies shows where they differ.
+
+### Distillation: what ObfusAI does not do
+
+Distillation trains a model on the **outputs** of your system (input/output pairs, sometimes reasoning traces). Hiding or obfuscating the prompt does not change what the outputs reveal, so a competitor can approximate your behaviour without ever seeing the prompt. ObfusAI does not prevent that, and nothing at the prompt layer can. What helps is operational:
+
+- authentication and per-key quotas, and detection of scripted, high-volume, low-diversity query patterns;
+- exposing less: no raw reasoning traces or logprobs, bounded output length and format;
+- contractual terms you are prepared to enforce, and evidence that a copy came from you (the canaries above cover the *prompt* side only).
+
+If the value of your skill is its behaviour rather than its wording, hiding the prompt is the wrong lever.
+
 ## Features
 
 | | |
 |---|---|
+| 🔐 **Sealed prompts** | `obfusai.seal`: AES-256-GCM encryption at rest with authenticated labels; `obfusai serve` opens sealed placeholders server-side and fails closed without the key (needs `pip install obfusai[seal]`) |
+| 🕵 **Leak tracing** | `obfusai.canary`: per-recipient tokens (`embed_canaries`, `find_recipients`) to learn which copy of a prompt leaked |
 | 🔎 **Prompt audit** | `audit()` / `obfusai audit` finds secrets, cards, IDs, IBANs, phones, e-mails, IPs in a prompt, with checksum validation and masked previews |
 | 🛡 **Leak guard** | `LeakDetector` scans and redacts model output for protected values, aliases, anchors; works with or without obfuscation |
 | 🧪 **Red-team + fidelity harness** | `evaluate_extraction` and `evaluate_fidelity` measure leak rate and behaviour on your model, plaintext vs obfuscated |
@@ -352,6 +398,11 @@ obfusai restore reply.txt -m map.json
 obfusai scan reply.txt -m map.json        # exit code 1 if the reply leaks
 obfusai audit prompt.txt                  # exit code 1 if the prompt contains secrets / personal data
 obfusai serve --port 8787 --seed "$OBFUSAI_SEED"   # gateway for any language
+obfusai keygen                            # new key for sealed prompts
+obfusai seal skill.md --label desk -o skill.sealed    # key from $OBFUSAI_SEAL_KEY
+obfusai unseal skill.sealed --expect-label desk
+obfusai canary embed skill.md --recipient acme -o acme.md      # secret from $OBFUSAI_CANARY_SECRET
+obfusai canary find leaked.txt --recipients acme globex        # exit 1 if no token matches
 ```
 
 ## How it works
@@ -387,7 +438,7 @@ flowchart LR
 
 ## Roadmap
 
-Chat Completions `parse` / `stream` helpers · obfuscating pydantic-class structured-output schemas · decoding aliases inside tool-call arguments.
+Prompt audit and reply redaction enforced inside the gateway · Chat Completions `parse` / `stream` helpers · obfuscating pydantic-class structured-output schemas · decoding LangChain streamed `tool_call_chunks`.
 
 ## Development
 
