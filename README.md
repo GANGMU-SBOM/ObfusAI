@@ -69,3 +69,7 @@ docs = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)
 ```bash
 pip install -e ".[dev]" && pytest
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE).
