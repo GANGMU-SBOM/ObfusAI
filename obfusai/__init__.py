@@ -1,4 +1,4 @@
-"""ObfusAI: prompt, role and tool-schema obfuscation middleware for LLM applications."""
+"""ObfusAI: prompt hygiene for LLM apps: audit, leak detection, measurement and optional obfuscation."""
 
 from .core import (
     DETECTORS,

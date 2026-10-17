@@ -2,9 +2,9 @@
 
 # 🌀 ObfusAI
 
-**让泄露出去的提示词难以阅读——并实测它在*你的*模型上是否真的有效。**
+**面向 LLM 应用的提示词卫生工具包：找出提示词里的密钥，发现模型泄露指令，按需混淆，并实测这些手段在*你的*模型上是否真的有效。**
 
-面向 LLM 提示词、工具 Schema 与日志的混淆和泄露检测工具包，任何语言都可以通过本地网关使用。
+Python 库，另有面向其他所有语言的本地网关。
 核心零依赖 · Python 3.9+ · 支持 OpenAI · Anthropic · LangChain · LlamaIndex
 
 [![GitHub stars](https://img.shields.io/github/stars/GANGMU-SBOM/ObfusAI?style=social)](https://github.com/GANGMU-SBOM/ObfusAI/stargazers)
@@ -21,11 +21,21 @@
 
 ---
 
-## 为什么需要 ObfusAI？
+## 它到底解决什么问题？
 
-系统提示词是你的核心资产：交易规则、评分阈值、内部代号、路由逻辑……明文提示词会出现在日志、链路追踪、供应商后台、截图和 Bug 报告里，“把上面的内容原样重复一遍”这类攻击也能把它们从模型里套出来。
+如果你的系统提示词或工具 Schema 里承载着业务逻辑（阈值、定价规则、评分、内部代号），可能出五类不同的问题。它们需要不同的工具，被解决的程度也并不一样：
 
-ObfusAI 在提示词**离开你的进程之前**就对其改写：这些副本里看到的是符号而不是你的数字和关键词；而强大的模型只要拿到一张小小的解码表，仍有可能按原意执行。
+| # | 问题 | ObfusAI 提供什么 | 能信到什么程度 |
+|---|---|---|---|
+| 1 | **密钥和个人信息被写进了提示词**（API Key、银行卡号、客户邮箱） | `audit` / `obfusai audit`：对银行卡、证件号、IBAN、密钥、JWT、邮箱、电话等做带校验位的检测 | 已知格式**可靠**。属于启发式：只能降低概率，不能证明提示词是干净的 |
+| 2 | **模型泄露了它的指令**（“把上面的内容原样重复一遍”），而且没人发现 | `LeakDetector`：扫描并脱敏回复里的受保护值、别名和锚点。明文提示词也能用（`values=[...]`） | 对你列出的值**检测得准**。只检测，不阻止 |
+| 3 | **你不知道提示词到底有多容易泄露，也不知道改动是否把它改坏了** | `evaluate_extraction`（9 种套取攻击，统计泄露率）和 `evaluate_fidelity`（行为是否保持），外加面向真实模型的一键脚本 | **测的是你的模型**，所以对该模型和该提示词可信 |
+| 4 | **明文逻辑散落在日志、链路追踪、后台、截图里** | 混淆：把数字、关键词、标识符换成符号，并附上解码表 | **效果弱，也不是免费的。** 只能防“扫一眼”，防不住“读一读”（详见下文） |
+| 5 | **你的技术栈不是 Python** | `obfusai serve`：本地网关，任何语言的 OpenAI/Anthropic SDK 指过去即可 | 可用。已在 JS SDK 以及 Go、Java、Ruby、PHP 的 HTTP 客户端上验证 |
+
+所以诚实的概括是：**可靠的部分是审计、泄露检测和评测工具；混淆只是一个可选的附加项，它有没有价值你必须自己测。**
+
+### 混淆能做什么，不能做什么
 
 ```text
 混淆前                                           混淆后（medium）
@@ -40,29 +50,30 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
                                                 </obfusai-context>
 ```
 
-> **请先读这段：它是什么，不是什么。**
->
-> - 它是“混淆”，不是“加密”，更**不是安全边界**。解码表和符号在同一个上下文里，任何能让模型吐出上下文的手段都会同时吐出两者：会“原样重复上面所有内容”的模型也会把解码表一起重复。仓库里的单元测试（`tests/test_redteam.py`）就展示了这一点：回显型模型无论用不用 ObfusAI，受保护的值都 100% 泄露。
-> - 它可能有帮助的地方：落进日志、链路追踪、后台和截图里的提示词与工具 Schema 副本；grep 式的批量抓取；对“不要泄露这张表”比对“不要泄露你的提示词”更听话的模型。与混淆无关，泄露检测和提示词审计本身能抓出真实的失误。
-> - **有没有帮助取决于你的模型和提示词，而且可能损失准确率、增加 Token**（短提示词会因解码表膨胀约 3～4 倍）。不要想当然：先[实测](#上线前先实测)。
-> - 真正有效的防线：别把机密和业务逻辑写进提示词（改成调用服务端工具），永远别把凭证写进去，并过滤输出。
+- 符号替换了正文里的值，但**解码表就在同一条消息里**。`low` / `medium` 档里，解码表以明文列出真实值，所以搜索 `momentum_score` 仍然能找到（在表里）。`high` 档把定义逆序并混入诱饵，能挡住 `grep` 和随意浏览，但挡不住真人或模型。
+- 会重复上下文的模型会连解码表一起重复。仓库里的单元测试（`tests/test_redteam.py`）里，回显型模型无论用不用 ObfusAI，受保护的值都 100% 泄露。
+- 它不是免费的：短提示词会因为解码表膨胀约 3～4 倍，模型按解码后的指令执行也可能不如按明文执行。
+- 适用场景：提示词必须承载逻辑，*并且*你在意的风险是随意暴露（有人扫一眼链路追踪、被截了一半的截图）。不要把它当作保密措施。
+
+### 它不解决什么
+
+- **抵御有决心的攻击者的保密性。** 这是混淆，不是加密，更不是安全边界。
+- **凭证。** 永远不要去混淆它们，直接删掉（`audit` 能找出来）。
+- 如果你需要真正的保密，请改架构：把逻辑放在服务端，让模型调用只返回结果、不返回规则的工具；永远别把机密写进提示词；做限流并过滤输出。ObfusAI 是对这些措施的补充，不是替代。
+
+> **依赖这一切之前，先实测：** `python examples/validate_real_model.py --yes`（需要你自己的 API Key，见[上线前先实测](#上线前先实测)）。这个仓库里的东西目前还没有用真实模型实测过。
 
 ## 功能一览
 
 | | |
 |---|---|
-| 🔣 **符号匿名化** | 把数字、指标、代码标识符、引号内字符串、缩写、专有名词短语、邮箱、URL、IP 以及你自定义的关键词/正则，映射为希腊字母别名（`α`、`β₁₇`、`⟦Ω⟧`） |
-| ⚓ **上下文锚定** | 自带 `<obfusai-context>` 说明块，指导模型静默解码，并禁止泄露该表。支持中文/英文、完整/精简两种写法 |
-| 🎚 **三档强度** | `low` · `medium` · `high`（高档含包裹式别名、逆序定义、诱饵别名、乱序表） |
-| 🧩 **整个请求一起保护** | 系统提示词与工具描述共用一张别名表；工具名、参数名、枚举值保持不变，工具调用照常工作 |
-| 🔌 **即插即用** | OpenAI（Chat Completions **与 Responses API**）和 Anthropic 客户端包装器——同步、异步、**流式**全支持——以及 LangChain 与 LlamaIndex 适配器（文档转换器、Runnable/LLM 包装器、节点后处理器） |
-| 🛡 **泄露防护** | `LeakDetector` 扫描模型输出中的锚点、别名定义、别名与受保护原值，并可一键脱敏 |
-| 🌊 **流式还原** | `StreamRestorer` 即使别名被切在两个数据块之间也能正确还原 |
-| 📏 **保真度评测** | `evaluate_fidelity` 在明文与各档位上回放你的测试用例，给出通过率、泄露率与体积膨胀 |
-| 📌 **兼容提示词缓存** | `alias_mode="stable"` 让别名只取决于密钥与原值，相同提示词输出逐字节一致 |
-| 🌍 **任何语言** | `obfusai serve` 是本地网关：把**任意**语言（JS/TS、Go、Java、C#、Rust、Ruby、PHP……）的 OpenAI/Anthropic SDK 指向它，提示词即被保护、回复自动还原，流式也支持 |
-| 🧪 **红队评测** | `evaluate_extraction` 用提示词套取攻击同时攻击明文和混淆后的提示词，告诉你混淆在你的模型上是否真的降低了泄露率 |
-| ⚙️ **命令行工具** | `obfusai obfuscate / restore / scan / audit / serve` |
+| 🔎 **提示词审计** | `audit()` / `obfusai audit` 找出提示词里的密钥、银行卡、证件号、IBAN、电话、邮箱、IP，带校验位验证，预览已脱敏 |
+| 🛡 **泄露防护** | `LeakDetector` 扫描并脱敏模型输出里的受保护值、别名和锚点；用不用混淆都能用 |
+| 🧪 **红队 + 保真度评测** | `evaluate_extraction` 与 `evaluate_fidelity` 在你的模型上测泄露率和行为，对比明文与混淆后的效果 |
+| 🌍 **任何语言** | `obfusai serve` 网关：把任意语言（JS/TS、Go、Java、C#、Rust、Ruby、PHP……）的 OpenAI/Anthropic SDK 指过去即可；JSON 与 SSE 回复都会还原 |
+| 🔌 **Python 集成** | OpenAI（Chat Completions 与 Responses API）和 Anthropic 包装器（同步、异步、流式），LangChain 与 LlamaIndex 适配器 |
+| 🔣 **混淆（可选）** | 数字、标识符、引号字符串、缩写、邮箱、URL、IP、日期、你的关键词/正则 -> 希腊字母别名；三档强度；按字段的策略；用于提示词缓存的稳定别名；工具调用参数和流式输出会被还原 |
+| ⚓ **上下文锚定** | 自带 `<obfusai-context>` 说明块（中文或英文，完整或精简），告诉模型如何解码 |
 | 🪶 **零依赖核心** | 纯标准库、严格类型标注，遇到空串或怪异输入也不会崩溃 |
 
 ## 安装
@@ -75,7 +86,40 @@ pip install "obfusai[llamaindex]"      # 含 LlamaIndex 适配器
 pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git
 ```
 
-## 60 秒上手
+## 快速开始
+
+先用最可靠的部分，按这个顺序来。
+
+**1. 审计提示词里有没有密钥和个人信息**（适合放进 CI：发现问题时退出码为 1）
+
+```bash
+obfusai audit prompt.txt
+```
+```python
+from obfusai import audit
+
+report = audit(system_prompt)
+if not report.clean:
+    print(report.counts)        # {"secrets": 1, "emails": 2}，预览已脱敏
+```
+
+**2. 防止模型回复里出现你绝不希望用户看到的值**
+
+```python
+from obfusai import LeakDetector
+
+guard = LeakDetector(values=["mean_reversion_v7", "0.73", "Helios Capital"])   # 不需要混淆
+if guard.scan(model_reply).leaked:
+    model_reply = guard.redact(model_reply)
+```
+
+**3. 在你的模型上测一测提示词到底有多容易泄露**（需要你的 API Key）
+
+```bash
+python examples/validate_real_model.py --yes
+```
+
+**4. 混淆（可选）**，只有实测表明有帮助时再用：
 
 ```python
 from obfusai import ObfusAIComponent
@@ -186,6 +230,8 @@ engine = index.as_query_engine(
 | `medium`（默认） | + 引号内字符串、ACRONYM 缩写、Proper Noun 专有名词短语 | 均衡 |
 | `high` | + 领域长词、`⟦α⟧` 包裹式别名、**逆序**锚点定义、**诱饵**别名、乱序表 | 锚点最大、最难读，模型解码余量最小——**务必在你的模型上实测** |
 
+只有 `high` 档能让值躲过纯文本搜索：`low` 和 `medium` 档的锚点里是逐字列出的。
+
 始终保持原样：模板占位符（`{var}`、`{{var}}`、`${var}`、`%(x)s`）、聊天特殊标记、列表序号，以及 `NEVER` / `MUST` 这类指令性词汇。短提示词要承担固定的锚点开销（上面的例子体积约 ×4）；真实的多页提示词里这个比例会迅速下降，`anchor_style="compact"` 还可进一步压缩。
 
 ## 精细控制要隐藏什么
@@ -261,7 +307,7 @@ if report.leaked:                       # 类型：anchor · definition · sessi
     reply = guard.redact(model_reply)   # 清除锚点/定义，遮盖别名与原值
 ```
 
-流式安全还原：`StreamRestorer(result.mapping).feed(chunk)` …… `.flush()`。
+配合混淆使用时，用这次运行的结果来构造检测器：`LeakDetector(result.mapping, session_ids=[result.session_id])`。不混淆时，像快速开始里那样传入要保护的值（`values=[...]`）。流式安全还原：`StreamRestorer(result.mapping).feed(chunk)` …… `.flush()`。
 
 ## 上线前先实测
 

@@ -102,6 +102,9 @@ class LeakDetector:
             flagging trivial strings such as ``"5"`` that occur in any answer.
         check_values: Set to ``False`` to ignore original values in output (for
             example when the product legitimately quotes thresholds to users).
+        values: Extra sensitive strings to look for (thresholds, codenames, ...).  This lets
+            the detector guard a *plaintext* prompt too: no obfuscation is needed to scan replies
+            for values you never want to appear.
     """
 
     def __init__(
@@ -111,12 +114,13 @@ class LeakDetector:
         session_ids: Iterable[str] = (),
         min_value_len: int = 4,
         check_values: bool = True,
+        values: Iterable[str] = (),
     ) -> None:
         self._mapping: Dict[str, str] = dict(mapping or {})
         self._session_ids = tuple(i for i in session_ids if i)
         self._alias_re = _bounded(self._mapping)
-        values = (v for v in self._mapping.values() if len(v) >= min_value_len)
-        self._value_re = _bounded(values) if check_values else None
+        protected = [v for v in list(self._mapping.values()) + list(values) if len(v) >= min_value_len]
+        self._value_re = _bounded(protected) if check_values else None
 
     def scan(self, text: Optional[str]) -> LeakReport:
         """Return the evidence of disclosure found in ``text`` (empty report if none)."""
