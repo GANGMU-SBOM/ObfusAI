@@ -348,7 +348,7 @@ def test_responses_nothing_to_hide_and_blocked_helpers() -> None:
     assert client.responses.create(model="m", input="hello", instructions="be kind").output_text
     assert fake.calls[0]["instructions"] == "be kind"
     with pytest.raises(AttributeError):
-        client.responses.parse
+        client.responses.retrieve  # not wrapped: nothing to decode without the original request's table
 
 
 @pytest.mark.parametrize("chunk", [1, 2, 3, 100])
@@ -467,3 +467,145 @@ def test_openai_wrapper_streams_with_n_greater_than_one() -> None:
     client = ObfusAIOpenAI(fake, ObfusAIComponent("low", seed="s"))
     chunks = list(client.chat.completions.create(stream=True, n=2, **_kwargs()))
     assert "".join(c.choices[0].delta.content or "" for c in chunks) == "The metric edge_bps matters."
+
+
+# ----------------------------------------------------------------- Responses: parse, stream helper, schemas
+class FakeResponsesHelperClient(FakeResponsesClient):
+    def __init__(self, chunk: int = 3) -> None:
+        super().__init__(chunk)
+        self.responses.parse = self._parse
+        self.responses.stream = self._stream
+
+    def _parse(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        sent = kwargs["instructions"]
+        reply = FakeResponse(REPLY.format(alias=_alias_of(sent)))
+        reply.output_parsed = NS(answer="parsed by the SDK")
+        return reply
+
+    def _stream(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        text = REPLY.format(alias=_alias_of(kwargs["instructions"]))
+        return FakeResponseStreamManager(text, self.chunk)
+
+
+class FakeResponseStreamManager:
+    def __init__(self, text: str, chunk: int) -> None:
+        self.text, self.chunk, self.exited = text, chunk, False
+
+    def __enter__(self) -> Any:
+        text, chunk = self.text, self.chunk
+        ids = dict(item_id="msg_1", output_index=0, content_index=0)
+        events, acc = [NS(type="response.created")], ""
+        for i in range(0, len(text), chunk):
+            acc += text[i : i + chunk]
+            events.append(NS(type="response.output_text.delta", delta=text[i : i + chunk], snapshot=acc, **ids))
+        events += [NS(type="response.output_text.done", text=text, parsed=None, **ids),
+                   NS(type="response.completed", response=FakeResponse(text))]
+
+        class Stream:
+            def __iter__(self_inner) -> Any:
+                return iter(events)
+
+            def get_final_response(self_inner) -> Any:
+                return FakeResponse(text)
+
+            def until_done(self_inner) -> str:
+                return "done"
+
+        return Stream()
+
+    def __exit__(self, *exc: Any) -> None:
+        self.exited = True
+
+
+def test_responses_parse_decodes_text_and_leaves_parsed_output_alone() -> None:
+    fake = FakeResponsesHelperClient()
+    reply = _resp(fake).responses.parse(model="m", instructions=SYSTEM, input="hi", text_format=object)
+    assert decode_with_anchor(fake.calls[0]["instructions"]) == SYSTEM
+    assert fake.calls[0]["text_format"] is object  # forwarded untouched
+    assert reply.output_text == "The metric edge_bps matters."
+    assert reply.output_parsed.answer == "parsed by the SDK"
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 3, 100])
+def test_responses_stream_helper_decodes_events_and_final_response(chunk: int) -> None:
+    fake = FakeResponsesHelperClient(chunk=chunk)
+    manager = _resp(fake).responses.stream(model="m", instructions=SYSTEM, input="hi")
+    assert "<obfusai-context" in fake.calls[0]["instructions"]
+    with manager as stream:
+        events = list(stream)
+        deltas = [e for e in events if e.type == "response.output_text.delta"]
+        assert "".join(e.delta for e in deltas) == "The metric edge_bps matters."
+        assert deltas[-1].snapshot == "The metric edge_bps matters."
+        assert all("The metric edge_bps matters.".startswith(e.snapshot) for e in deltas)
+        done = next(e for e in events if e.type == "response.output_text.done")
+        assert done.text == "The metric edge_bps matters." and events.index(done) > events.index(deltas[-1])
+        assert next(e for e in events if e.type == "response.completed").response.output_text == "The metric edge_bps matters."
+        assert stream.get_final_response().output_text == "The metric edge_bps matters."
+        assert stream.until_done() == "done"
+    assert manager._inner.exited
+
+
+def test_responses_stream_helper_passthrough_without_restoration() -> None:
+    fake = FakeResponsesHelperClient()
+    manager = _resp(fake, restore_responses=False).responses.stream(model="m", instructions=SYSTEM, input="hi")
+    assert isinstance(manager, FakeResponseStreamManager)
+
+
+def test_structured_output_schema_text_is_obfuscated() -> None:
+    fake = FakeResponsesClient()
+    schema = {"type": "json_schema", "name": "signal", "strict": True, "schema": {
+        "type": "object", "title": "Signal for edge_bps",
+        "properties": {"side": {"type": "string", "enum": ["BUY", "SELL"], "description": "BUY when edge_bps > 35.5"}}}}
+    _resp(fake).responses.create(model="m", instructions=SYSTEM, input="hi", text={"format": schema})
+    sent = fake.calls[0]["text"]["format"]
+    assert sent["name"] == "signal" and sent["schema"]["properties"]["side"]["enum"] == ["BUY", "SELL"]
+    assert "edge_bps" not in sent["schema"]["title"] and "35.5" not in sent["schema"]["properties"]["side"]["description"]
+    assert schema["schema"]["title"] == "Signal for edge_bps"  # caller's dict untouched
+    chat = ObfusAIComponent("low", seed="s").obfuscate_payload(
+        {"messages": [{"role": "system", "content": SYSTEM}],
+         "response_format": {"type": "json_schema", "json_schema": {"name": "n", "schema": {"description": "edge_bps"}}}}
+    )
+    assert "edge_bps" not in chat.payload["response_format"]["json_schema"]["schema"]["description"]
+    from obfusai import FieldPolicy
+    kept = ObfusAIComponent("low", seed="s", policies={"schemas": FieldPolicy(skip=True)}).obfuscate_payload(
+        {"messages": [{"role": "system", "content": SYSTEM}],
+         "response_format": {"type": "json_schema", "json_schema": {"schema": {"description": "edge_bps"}}}}
+    )
+    assert kept.payload["response_format"]["json_schema"]["schema"]["description"] == "edge_bps"
+
+
+def test_responses_stream_helper_async() -> None:
+    class AsyncManager:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        async def __aenter__(self) -> Any:
+            text = self.text
+            events = [NS(type="response.output_text.delta", delta=text[i : i + 2], snapshot=text[: i + 2], item_id="m", output_index=0, content_index=0) for i in range(0, len(text), 2)]
+            stream = NS(get_final_response=None)
+
+            async def final() -> Any:
+                return FakeResponse(text)
+
+            stream.get_final_response = final
+            return _AsyncStream(events, stream)
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+    class _AsyncStream(_AsyncIter):
+        def __init__(self, items: list, inner: Any) -> None:
+            super().__init__(items)
+            self.get_final_response = inner.get_final_response
+
+    async def run() -> tuple:
+        fake = FakeResponsesHelperClient()
+        fake.responses.stream = lambda **kw: AsyncManager(REPLY.format(alias=_alias_of(kw["instructions"])))
+        async with _resp(fake).responses.stream(model="m", instructions=SYSTEM, input="hi") as stream:
+            text = "".join([e.delta async for e in stream])
+            final = await stream.get_final_response()
+        return text, final.output_text
+
+    assert asyncio.run(run()) == ("The metric edge_bps matters.",) * 2

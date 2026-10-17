@@ -101,6 +101,12 @@ client = ObfusAIOpenAI(OpenAI(), ObfusAIComponent("high", seed="my-secret"))
 reply = client.chat.completions.create(model="gpt-4o", messages=[...], tools=[...])   # streaming works too
 reply = client.responses.create(model="gpt-4o", instructions=SYSTEM, input="hi", tools=[...])  # Responses API
 print(reply.output_text)                                                              # decoded
+parsed = client.responses.parse(model="gpt-4o", instructions=SYSTEM, input="hi", text_format=Signal)   # structured output
+
+with client.responses.stream(model="gpt-4o", instructions=SYSTEM, input="hi") as stream:   # stream helper
+    for event in stream:                     # delta / snapshot / done events are decoded
+        ...
+    final = stream.get_final_response()      # decoded
 ```
 
 ```python
@@ -116,7 +122,7 @@ with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[
     # or iterate the SDK's events (raw, `text`, `content_block_stop`) — all decoded; use one consumer per stream
 ```
 
-> The wrappers protect `chat.completions.create`, `responses.create`, `messages.create` and `messages.stream`. Other endpoints (batches, legacy completions, …) are **not** protected: unprotected `messages.*` methods raise instead of silently sending plaintext, but other client attributes are forwarded as-is.
+> The wrappers protect `chat.completions.create`, `responses.create` / `parse` / `stream`, `messages.create` and `messages.stream`. Other endpoints (batches, legacy completions, …) are **not** protected: unprotected `messages.*` methods raise instead of silently sending plaintext, but other client attributes are forwarded as-is. Structured-output schemas given as dicts (`text`, `response_format`) are obfuscated like tool schemas; schemas given as pydantic classes (`text_format`) are converted by the SDK and sent as-is, and `output_parsed` is parsed by the SDK from the model's raw text.
 
 ### LangChain
 
@@ -140,7 +146,7 @@ engine = index.as_query_engine(
 )
 ```
 
-Obfuscate at query time with the postprocessor so retrieval still runs on readable text; `ObfusAITransform` (ingestion) stores obfuscated text, which embeds poorly. Set `system_prompt` on the wrapper, not on the wrapped LLM; tool-calling (`FunctionCallingLLM`) methods are not forwarded; node metadata is only obfuscated with `obfuscate_metadata=True`.
+Obfuscate at query time with the postprocessor so retrieval still runs on readable text; `ObfusAITransform` (ingestion) stores obfuscated text, which embeds poorly. Set `system_prompt` on the wrapper, not on the wrapped LLM. `ObfusAILLM` is a `FunctionCallingLLM`: `chat_with_tools`, `predict_and_call`, agents and the streaming variants work, and the `description`/`title` text of dict-based tool schemas (OpenAI, Anthropic, Mistral-style providers) is obfuscated with the same alias table (names, parameters and enums stay intact). Node metadata is only obfuscated with `obfuscate_metadata=True`.
 
 ## Intensity levels
 
@@ -283,7 +289,7 @@ flowchart LR
 
 ## Roadmap
 
-LlamaIndex `FunctionCallingLLM` / tool schemas · OpenAI `responses.parse` / `responses.stream` helpers.
+Chat Completions `parse` / `stream` helpers · obfuscating pydantic-class structured-output schemas · decoding aliases inside tool-call arguments.
 
 ## Development
 

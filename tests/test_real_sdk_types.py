@@ -94,3 +94,21 @@ def test_chat_completion_chunks_real_types_two_choices() -> None:
         text[c.choices[0].index] += c.choices[0].delta.content or ""
     assert text == {0: "see alpha_x", 1: "also alpha_x"}
     assert out[-1].choices[0].finish_reason == "stop"
+
+
+def test_responses_stream_helper_events_with_snapshot_real_types() -> None:
+    pytest.importorskip("openai")
+    from openai.lib.streaming.responses._events import ResponseTextDeltaEvent, ResponseTextDoneEvent
+
+    ids = dict(item_id="i", output_index=0, content_index=0, sequence_number=0, logprobs=[])
+    acc = ""
+    events = []
+    for t in ["see ", "α", " ok"]:
+        acc += t
+        events.append(ResponseTextDeltaEvent(type="response.output_text.delta", delta=t, snapshot=acc, **ids))
+    events.append(ResponseTextDoneEvent(type="response.output_text.done", text=acc, parsed=None, **ids))
+    out = list(restore_events(events, ResponsesEventRestorer(MAPPING)))
+    deltas = [e for e in out if e.type == "response.output_text.delta"]
+    assert "".join(e.delta for e in deltas) == "see alpha_x ok"
+    assert deltas[-1].snapshot == "see alpha_x ok"
+    assert out[-1].text == "see alpha_x ok"

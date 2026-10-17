@@ -21,15 +21,27 @@ The Responses API is supported the same way (``instructions``, ``input`` items w
     reply = client.responses.create(model="gpt-4o", instructions=SYSTEM, input="hi", tools=[...])
     reply.output_text          # decoded
 
-Protected entry points are ``chat.completions.create`` and ``responses.create``;
-``parse``/``stream`` helpers are not exposed, and other client attributes are forwarded
-untouched and are **not** protected.
+``responses.parse`` (structured output) and the ``responses.stream`` helper are protected too::
+
+    parsed = client.responses.parse(model="gpt-4o", instructions=SYSTEM, input="hi", text_format=Signal)
+    parsed.output_text         # decoded (``output_parsed`` is parsed by the SDK from the model's raw text)
+
+    with client.responses.stream(model="gpt-4o", instructions=SYSTEM, input="hi") as stream:
+        for event in stream:               # delta / snapshot / done events are decoded
+            ...
+        final = stream.get_final_response()   # decoded text
+
+Protected entry points are ``chat.completions.create``, ``responses.create``,
+``responses.parse`` and ``responses.stream``; other client attributes are forwarded
+untouched and are **not** protected.  Structured-output schemas given as dicts (``text``,
+``response_format``) have their ``description``/``title`` text obfuscated; schemas given
+as pydantic classes (``text_format``) are converted by the SDK and are sent as-is.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Mapping, Optional
+from typing import Any, AsyncIterator, Iterator, Mapping, Optional
 
 from ..core import ObfusAIComponent
 from ._common import protect_kwargs, restore_attr
@@ -74,14 +86,81 @@ class _Completions:
         return result
 
 
+class _RestoredResponseStream:
+    """Decoded wrapper around the SDK's ``ResponseStream`` / ``AsyncResponseStream``."""
+
+    def __init__(self, inner: Any, mapping: Mapping[str, str]) -> None:
+        self._inner = inner
+        self._mapping = dict(mapping)
+
+    def __iter__(self) -> Iterator[Any]:
+        return restore_events(self._inner, ResponsesEventRestorer(self._mapping))
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return arestore_events(self._inner, ResponsesEventRestorer(self._mapping))
+
+    def get_final_response(self) -> Any:
+        result = self._inner.get_final_response()
+        if inspect.isawaitable(result):
+            return self._await_final(result)
+        restore_response_output(result, self._mapping)
+        return result
+
+    async def _await_final(self, awaited: Any) -> Any:
+        result = await awaited
+        restore_response_output(result, self._mapping)
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _ResponseStreamManager:
+    """Wraps the object returned by ``responses.stream(...)`` (a sync or async context manager)."""
+
+    def __init__(self, inner: Any, mapping: Mapping[str, str]) -> None:
+        self._inner = inner
+        self._mapping = mapping
+
+    def __enter__(self) -> _RestoredResponseStream:
+        return _RestoredResponseStream(self._inner.__enter__(), self._mapping)
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._inner.__exit__(*exc)
+
+    async def __aenter__(self) -> _RestoredResponseStream:
+        return _RestoredResponseStream(await self._inner.__aenter__(), self._mapping)
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._inner.__aexit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _Responses:
     def __init__(self, owner: "ObfusAIOpenAI") -> None:
         self._owner = owner
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call("create", args, kwargs)
+
+    def parse(self, *args: Any, **kwargs: Any) -> Any:
+        """Structured output; the SDK parses ``output_parsed`` from the model's raw text."""
+        return self._call("parse", args, kwargs)
+
+    def stream(self, *args: Any, **kwargs: Any) -> Any:
         owner = self._owner
         call_kwargs, mapping = protect_kwargs(owner.component, kwargs, "responses")
-        result = owner.client.responses.create(*args, **call_kwargs)
+        manager = owner.client.responses.stream(*args, **call_kwargs)
+        if not owner.restore_responses or not mapping:
+            return manager
+        return _ResponseStreamManager(manager, mapping)
+
+    def _call(self, method: str, args: Any, kwargs: Any) -> Any:
+        owner = self._owner
+        call_kwargs, mapping = protect_kwargs(owner.component, kwargs, "responses")
+        result = getattr(owner.client.responses, method)(*args, **call_kwargs)
         if not owner.restore_responses or not mapping:
             return result
         stream = bool(kwargs.get("stream"))
@@ -109,7 +188,7 @@ class _Chat:
 
 
 class ObfusAIOpenAI:
-    """Proxy around an OpenAI client that protects ``chat.completions.create`` and ``responses.create``.
+    """Proxy around an OpenAI client that protects ``chat.completions.create`` and ``responses.create``/``parse``/``stream``.
 
     All other attributes are forwarded to the wrapped client.
 
