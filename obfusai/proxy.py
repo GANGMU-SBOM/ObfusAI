@@ -8,6 +8,12 @@ Swift, curl ...)::
     obfusai serve --port 8787 --level medium --seed "$OBFUSAI_SEED"
     # then point the SDK at http://127.0.0.1:8787  (OpenAI: .../v1,  Anthropic: no /v1 suffix)
 
+Sealed prompts: a request may carry ``obfusai-sealed:v1:...`` blobs (see :mod:`obfusai.seal`) in any prompt
+string.  The gateway decrypts them with the key it alone holds (``OBFUSAI_SEAL_KEY`` /
+``OBFUSAI_SEAL_PASSPHRASE``), then obfuscates and forwards, so clients, repositories and packages only ever
+contain ciphertext.  Without a key a request that carries a sealed blob is rejected (fail closed).  The
+model provider still receives the (obfuscated) plaintext, and the gateway host must be one you control.
+
 Handled endpoints (request obfuscated, response decoded, streaming included):
 
 * ``POST /v1/chat/completions``      OpenAI Chat Completions (and compatible servers)
@@ -43,6 +49,7 @@ from .adapters._streams import (
     restore_response_output,
 )
 from .core import ObfusAIComponent
+from .seal import MARKER, SealError, unseal_payload
 
 __all__ = ["ROUTES", "make_server", "serve"]
 
@@ -130,8 +137,10 @@ class _Config:
     def __init__(
         self, component: ObfusAIComponent, upstream_openai: str, upstream_anthropic: str,
         strict: bool, timeout: float, log: Callable[[str], None],
+        seal_secret: Optional[Dict[str, str]] = None,
     ) -> None:
         self.component = component
+        self.seal_secret = seal_secret
         self.upstreams = {"openai": _Upstream(upstream_openai), "anthropic": _Upstream(upstream_anthropic)}
         self.strict = strict
         self.timeout = timeout
@@ -313,6 +322,16 @@ def _handler_class(config: _Config) -> type:
             except ValueError as exc:
                 self._error(400, f"invalid JSON request body: {exc}")  # fail closed: never forward unparsed prompts
                 return
+            if MARKER in raw.decode("utf-8", "ignore"):
+                if not config.seal_secret:
+                    self._error(400, "request carries a sealed prompt but the gateway has no seal key (OBFUSAI_SEAL_KEY)")
+                    return
+                try:
+                    payload = unseal_payload(payload, **config.seal_secret)
+                except (SealError, ImportError) as exc:
+                    config.log(f"WARNING sealed prompt rejected: {exc}")
+                    self._error(400, "a sealed prompt could not be opened (wrong key, tampered, or cryptography missing)")
+                    return
             protected = config.component.obfuscate_payload(payload, style=style)
             body = _dumps(protected.payload).encode("utf-8")
             opened = self._open_upstream(provider, body)
@@ -354,10 +373,20 @@ def make_server(
     strict: bool = False,
     timeout: float = 600.0,
     log: Optional[Callable[[str], None]] = None,
+    seal_key: Optional[str] = None,
+    seal_passphrase: Optional[str] = None,
 ) -> ThreadingHTTPServer:
-    """Create (but do not start) the gateway server; ``port=0`` picks a free port."""
+    """Create (but do not start) the gateway server; ``port=0`` picks a free port.
+
+    ``seal_key`` / ``seal_passphrase`` let the gateway open sealed prompts (:mod:`obfusai.seal`).
+    """
     logger = log or (lambda message: print(message, file=sys.stderr))
-    config = _Config(component, upstream_openai, upstream_anthropic, strict, timeout, logger)
+    secret: Optional[Dict[str, str]] = None
+    if seal_key:
+        secret = {"key": seal_key}
+    elif seal_passphrase:
+        secret = {"passphrase": seal_passphrase}
+    config = _Config(component, upstream_openai, upstream_anthropic, strict, timeout, logger, secret)
     server = ThreadingHTTPServer((host, port), _handler_class(config))
     server.daemon_threads = True
     return server

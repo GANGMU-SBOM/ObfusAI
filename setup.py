@@ -36,7 +36,8 @@ setup(
     extras_require={
         "langchain": ["langchain-core>=0.2.0"],
         "llamaindex": ["llama-index-core>=0.12.0"],
-        "dev": ["pytest>=7.0", "langchain-core>=0.2.0", "llama-index-core>=0.12.0"],
+        "seal": ["cryptography>=42.0"],
+        "dev": ["pytest>=7.0", "langchain-core>=0.2.0", "llama-index-core>=0.12.0", "cryptography>=42.0"],
     },
     classifiers=[
         "Programming Language :: Python :: 3",

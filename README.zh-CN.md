@@ -32,6 +32,8 @@ Python 库，另有面向其他所有语言的本地网关。
 | 3 | **你不知道提示词到底有多容易泄露，也不知道改动是否把它改坏了** | `evaluate_extraction`（9 种套取攻击，统计泄露率）和 `evaluate_fidelity`（行为是否保持），外加面向真实模型的一键脚本 | **测的是你的模型**，所以对该模型和该提示词可信 |
 | 4 | **明文逻辑散落在日志、链路追踪、后台、截图里** | 混淆：把数字、关键词、标识符换成符号，并附上解码表 | **效果弱，也不是免费的。** 只能防“扫一眼”，防不住“读一读”（详见下文） |
 | 5 | **你的技术栈不是 Python** | `obfusai serve`：本地网关，任何语言的 OpenAI/Anthropic SDK 指过去即可 | 可用。已在 JS SDK 以及 Go、Java、Ruby、PHP 的 HTTP 客户端上验证 |
+| 6 | **Skill 提示词以明文文件存放或分发**（仓库、安装包、备份、应用市场） | `seal`：AES-256-GCM 静态加密；网关在服务端打开密文占位符，客户端手里只有密文 | **真加密**，但只防没有密钥的人。真正运行提示词的一方和模型供应商仍然看得到明文 |
+| 7 | **提示词泄露了，需要知道是哪一份泄露的** | `canary`：每个接收方一个唯一标记，一次调用就能查出来 | 是证据，不是预防；读到提示词的攻击者可以删掉他发现的标记 |
 
 所以诚实的概括是：**可靠的部分是审计、泄露检测和评测工具；混淆只是一个可选的附加项，它有没有价值你必须自己测。**
 
@@ -63,10 +65,54 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
 
 > **依赖这一切之前，先实测：** `python examples/validate_real_model.py --yes`（需要你自己的 API Key，见[上线前先实测](#上线前先实测)）。这个仓库里的东西目前还没有用真实模型实测过。
 
+## Skill 提示词的静态存放、泄露溯源与蒸馏
+
+### 让 Skill 提示词不以明文存放
+
+模型必须拿到明文，所以提示词没法对执行它的机器和模型供应商隐藏。你*能*做的是：在其他所有地方（git、安装包、备份、构建缓存、应用市场）都保持加密，只在你能控制的基础设施上解密：
+
+```bash
+export OBFUSAI_SEAL_KEY="$(obfusai keygen)"                 # 放进密钥管理系统，别放进仓库
+obfusai seal skills/desk.md --label desk -o skills/desk.sealed   # 一行 URL 安全文本，可放心提交和分发
+obfusai serve --port 8787                                    # 网关持有密钥
+# 客户端发送这一行密文，而不是提示词；网关解密、混淆、再转发
+```
+```python
+from obfusai.seal import seal, unseal            # pip install "obfusai[seal]"
+
+blob = seal(prompt, key=key, label="desk")       # AES-256-GCM；label 受认证保护（密文不能被调包）
+prompt = unseal(blob, key=key, expect_label="desk")   # 在进程内、调用前一刻解密
+```
+
+如果你分发的 Skill 是**在客户机器上、用客户自己的 API Key** 运行的，客户永远读得到它（他们能查看请求），任何加密都改变不了这一点。真正可行的架构是把执行和密钥留在你这边：客户调用你的服务，离开你服务的只有密文（或者只有一个 Skill 名）。没有密钥时，网关会拒绝携带密文的请求，绝不会把密文转发出去。
+
+### 追查是哪一份泄露的
+
+```python
+from obfusai.canary import embed_canaries, find_recipients
+
+copy = embed_canaries(prompt, "acme-corp", secret, count=3)      # 每个接收方一个唯一标记，分散在文本中
+find_recipients(leaked_text, ["acme-corp", "globex"], secret)    # -> ["acme-corp"]，不需要数据库
+```
+
+可以用在泄露出来的提示词上，也可以用在可疑产品对套取尝试的回复上。它是证据，不是预防：读到提示词的人可以删掉他注意到的标记，对比两份副本也能看出差异。
+
+### 蒸馏：ObfusAI 做不到什么
+
+蒸馏是用你系统的**输出**（输入/输出对，有时还有推理过程）训练一个模型。隐藏或混淆提示词并不会改变输出泄露的信息，所以竞争对手完全可以在没见过提示词的情况下逼近你的行为。ObfusAI 防不住这一点，提示词这一层的任何手段都防不住。真正有效的是运营层面的措施：
+
+- 鉴权和按 Key 的配额，并检测脚本化、高频、低多样性的查询模式；
+- 少暴露：不返回原始推理过程和 logprobs，限制输出长度和格式；
+- 你准备去执行的合同条款，以及证明副本出自你的证据（上面的标记只覆盖*提示词*这一侧）。
+
+如果你的 Skill 的价值在于它的行为而不是措辞，那么隐藏提示词就找错了抓手。
+
 ## 功能一览
 
 | | |
 |---|---|
+| 🔐 **提示词加密存放** | `obfusai.seal`：AES-256-GCM 静态加密，标签受认证保护；`obfusai serve` 在服务端打开密文占位符，没有密钥时拒绝请求（需要 `pip install obfusai[seal]`） |
+| 🕵 **泄露溯源** | `obfusai.canary`：每个接收方一个标记（`embed_canaries`、`find_recipients`），查出泄露的是哪一份提示词 |
 | 🔎 **提示词审计** | `audit()` / `obfusai audit` 找出提示词里的密钥、银行卡、证件号、IBAN、电话、邮箱、IP，带校验位验证，预览已脱敏 |
 | 🛡 **泄露防护** | `LeakDetector` 扫描并脱敏模型输出里的受保护值、别名和锚点；用不用混淆都能用 |
 | 🧪 **红队 + 保真度评测** | `evaluate_extraction` 与 `evaluate_fidelity` 在你的模型上测泄露率和行为，对比明文与混淆后的效果 |
@@ -353,6 +399,11 @@ obfusai restore reply.txt -m map.json
 obfusai scan reply.txt -m map.json        # 回复存在泄露时退出码为 1
 obfusai audit prompt.txt                  # 提示词含密钥/个人信息时退出码为 1
 obfusai serve --port 8787 --seed "$OBFUSAI_SEED"   # 面向任何语言的网关
+obfusai keygen                            # 生成提示词加密用的新密钥
+obfusai seal skill.md --label desk -o skill.sealed    # 密钥取自 $OBFUSAI_SEAL_KEY
+obfusai unseal skill.sealed --expect-label desk
+obfusai canary embed skill.md --recipient acme -o acme.md      # 密钥取自 $OBFUSAI_CANARY_SECRET
+obfusai canary find leaked.txt --recipients acme globex        # 没有匹配时退出码为 1
 ```
 
 ## 工作原理
@@ -388,7 +439,7 @@ flowchart LR
 
 ## 路线图
 
-Chat Completions 的 `parse` / `stream` 辅助方法 · 混淆以 pydantic 类给出的结构化输出 Schema · 还原工具调用参数里的别名。
+在网关内强制执行提示词审计和回复脱敏 · Chat Completions 的 `parse` / `stream` 辅助方法 · 混淆以 pydantic 类给出的结构化输出 Schema · 还原 LangChain 流式的 `tool_call_chunks`。
 
 ## 开发
 

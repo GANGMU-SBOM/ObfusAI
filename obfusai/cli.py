@@ -1,4 +1,4 @@
-"""Command-line interface: ``obfusai obfuscate | restore | scan | audit | serve`` (also ``python -m obfusai``)."""
+"""Command-line interface: ``obfusai obfuscate | restore | scan | audit | serve | keygen | seal | unseal | canary``."""
 
 from __future__ import annotations
 
@@ -86,6 +86,34 @@ def build_parser() -> argparse.ArgumentParser:
     aud.add_argument("-d", "--detector", action="append", default=[], choices=DETECTORS,
                      help="detector to run (repeatable; default: emails, ips, secrets and personal-data detectors)")
 
+    sub.add_parser("keygen", help="print a new random 256-bit key for `seal` (keep it in a secret manager)")
+
+    for name, summary in (("seal", "encrypt a prompt file (AES-256-GCM) so no plaintext is stored"),
+                          ("unseal", "decrypt a sealed prompt file")):
+        sealer = sub.add_parser(name, help=summary)
+        sealer.add_argument("file", nargs="?", default="-")
+        sealer.add_argument("-o", "--output", metavar="FILE", help="write here instead of stdout")
+        sealer.add_argument("--key-env", default="OBFUSAI_SEAL_KEY", help="environment variable holding the key")
+        sealer.add_argument("--passphrase-env", help="use a passphrase from this environment variable instead of a key")
+        if name == "seal":
+            sealer.add_argument("--label", default="", help="bind the blob to a purpose, e.g. the skill name")
+        else:
+            sealer.add_argument("--expect-label", help="refuse blobs sealed for another label")
+
+    can = sub.add_parser("canary", help="per-recipient canary tokens to trace which prompt copy leaked")
+    can_sub = can.add_subparsers(dest="canary_command", required=True)
+    embed = can_sub.add_parser("embed", help="embed tokens for one recipient")
+    embed.add_argument("file", nargs="?", default="-")
+    embed.add_argument("--recipient", required=True)
+    embed.add_argument("--secret-env", default="OBFUSAI_CANARY_SECRET")
+    embed.add_argument("--count", type=int, default=3)
+    embed.add_argument("-o", "--output", metavar="FILE")
+    find = can_sub.add_parser("find", help="which recipients' tokens appear in a text (exit 1 if none)")
+    find.add_argument("file", nargs="?", default="-")
+    find.add_argument("--recipients", nargs="+", required=True)
+    find.add_argument("--secret-env", default="OBFUSAI_CANARY_SECRET")
+    find.add_argument("--count", type=int, default=3)
+
     srv = sub.add_parser(
         "serve",
         help="run a local gateway so any language's SDK is protected by pointing its base URL at it",
@@ -97,6 +125,27 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--upstream-anthropic", default="https://api.anthropic.com", help="Anthropic upstream base URL")
     srv.add_argument("--strict", action="store_true", help="reject POSTs to endpoints the gateway cannot protect")
     return parser
+
+
+def _env_secret(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise ValueError(f"environment variable {name} is not set")
+    return value
+
+
+def _seal_secret(args: argparse.Namespace) -> dict:
+    if args.passphrase_env:
+        return {"passphrase": _env_secret(args.passphrase_env)}
+    return {"key": _env_secret(args.key_env)}
+
+
+def _write(text: str, output: Optional[str], stdout: TextIO) -> None:
+    if output:
+        with open(output, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    else:
+        stdout.write(text if text.endswith("\n") else text + "\n")
 
 
 def main(argv: Optional[Sequence[str]] = None, stdin: Optional[TextIO] = None, stdout: Optional[TextIO] = None) -> int:
@@ -120,6 +169,34 @@ def main(argv: Optional[Sequence[str]] = None, stdin: Optional[TextIO] = None, s
             else:
                 stdout.write(result.prompt + ("\n" if not result.prompt.endswith("\n") else ""))
             return 0
+        if args.command == "keygen":
+            from .seal import generate_key
+
+            stdout.write(generate_key() + "\n")
+            return 0
+        if args.command in ("seal", "unseal"):
+            from .seal import SealError, seal, unseal
+
+            text = _read(args.file, stdin)
+            try:
+                if args.command == "seal":
+                    _write(seal(text.rstrip("\n"), label=args.label, **_seal_secret(args)), args.output, stdout)
+                else:
+                    _write(unseal(text.strip(), expect_label=args.expect_label, **_seal_secret(args)), args.output, stdout)
+            except SealError as exc:
+                raise ValueError(str(exc)) from None
+            return 0
+        if args.command == "canary":
+            from .canary import embed_canaries, find_recipients
+
+            secret = _env_secret(args.secret_env)
+            text = _read(args.file, stdin)
+            if args.canary_command == "embed":
+                _write(embed_canaries(text, args.recipient, secret, count=args.count), args.output, stdout)
+                return 0
+            hits = find_recipients(text, args.recipients, secret, count=args.count)
+            stdout.write("\n".join(hits) + ("\n" if hits else "no match\n"))
+            return 0 if hits else 1
         if args.command == "serve":
             from .proxy import serve
 
@@ -131,6 +208,7 @@ def main(argv: Optional[Sequence[str]] = None, stdin: Optional[TextIO] = None, s
             serve(
                 _component(args), args.host, args.port,
                 upstream_openai=args.upstream_openai, upstream_anthropic=args.upstream_anthropic, strict=args.strict,
+                seal_key=os.environ.get("OBFUSAI_SEAL_KEY"), seal_passphrase=os.environ.get("OBFUSAI_SEAL_PASSPHRASE"),
             )
             return 0
         if args.command == "restore":

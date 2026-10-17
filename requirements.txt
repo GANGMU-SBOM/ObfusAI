@@ -3,5 +3,7 @@
 langchain-core>=0.2.0
 # Optional: LlamaIndex adapter (obfusai.adapters.llamaindex)
 llama-index-core>=0.12.0
+# Optional: encryption at rest for prompts (obfusai.seal)
+cryptography>=42.0
 # Development
 pytest>=7.0
