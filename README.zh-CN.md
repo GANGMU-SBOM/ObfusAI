@@ -46,7 +46,7 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
 | ⚓ **上下文锚定** | 自带 `<obfusai-context>` 说明块，指导模型静默解码，并禁止泄露该表。支持中文/英文、完整/精简两种写法 |
 | 🎚 **三档强度** | `low` · `medium` · `high`（高档含包裹式别名、逆序定义、诱饵别名、乱序表） |
 | 🧩 **整个请求一起保护** | 系统提示词与工具描述共用一张别名表；工具名、参数名、枚举值保持不变，工具调用照常工作 |
-| 🔌 **即插即用** | OpenAI（Chat Completions **与 Responses API**）和 Anthropic 客户端包装器——同步、异步、**流式**全支持——以及 LangChain 文档转换器、Runnable 与模型包装器 |
+| 🔌 **即插即用** | OpenAI（Chat Completions **与 Responses API**）和 Anthropic 客户端包装器——同步、异步、**流式**全支持——以及 LangChain 与 LlamaIndex 适配器（文档转换器、Runnable/LLM 包装器、节点后处理器） |
 | 🛡 **泄露防护** | `LeakDetector` 扫描模型输出中的锚点、别名定义、别名与受保护原值，并可一键脱敏 |
 | 🌊 **流式还原** | `StreamRestorer` 即使别名被切在两个数据块之间也能正确还原 |
 | 📏 **保真度评测** | `evaluate_fidelity` 在明文与各档位上回放你的测试用例，给出通过率、泄露率与体积膨胀 |
@@ -59,6 +59,7 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
 ```bash
 pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git                           # 核心，无任何依赖
 pip install "obfusai[langchain] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"    # 含 LangChain 适配器
+pip install "obfusai[llamaindex] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"   # 含 LlamaIndex 适配器
 ```
 
 ## 60 秒上手
@@ -120,6 +121,20 @@ chain = prompt | ObfusAIProtectedModel(chat_model, ObfusAIComponent("high"))   #
 chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model         # 仅混淆
 docs  = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)  # 保护 RAG 里的内部手册
 ```
+
+### LlamaIndex
+
+```python
+from obfusai.adapters.llamaindex import ObfusAILLM, ObfusAINodePostprocessor
+
+llm = ObfusAILLM(OpenAI(model="gpt-4o"), ObfusAIComponent("high", seed="my-secret"), system_prompt=SYSTEM)
+engine = index.as_query_engine(
+    llm=llm,                                              # 系统提示词被混淆，回复自动还原（流式/异步同样支持）
+    node_postprocessors=[ObfusAINodePostprocessor()],     # 检索到的片段在检索*之后*再混淆
+)
+```
+
+建议在查询阶段用后处理器混淆，这样检索仍然基于可读文本；`ObfusAITransform`（入库阶段）会把混淆后的文本存进索引，向量检索效果会变差。请把 `system_prompt` 设在包装器上，而不是被包装的 LLM 上；工具调用（`FunctionCallingLLM`）相关方法不会被转发；节点元数据只有在 `obfuscate_metadata=True` 时才会被混淆。
 
 ## 三档强度
 
@@ -213,7 +228,7 @@ flowchart LR
 
 ## 路线图
 
-LlamaIndex 适配器 · 按字段的策略 · 更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
+按字段的策略 · 更丰富的 PII 检测器 · `messages.stream()` 的原始事件迭代还原。
 
 ## 开发
 

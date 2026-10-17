@@ -6,7 +6,7 @@ README = Path(__file__).parent / "README.md"
 
 setup(
     name="obfusai",
-    version="0.3.0",
+    version="0.4.0",
     description="Obfuscate LLM prompts, roles and tool schemas while keeping them executable by LLMs.",
     long_description=README.read_text(encoding="utf-8") if README.exists() else "",
     long_description_content_type="text/markdown",
@@ -17,7 +17,8 @@ setup(
     install_requires=[],
     extras_require={
         "langchain": ["langchain-core>=0.2.0"],
-        "dev": ["pytest>=7.0", "langchain-core>=0.2.0"],
+        "llamaindex": ["llama-index-core>=0.12.0"],
+        "dev": ["pytest>=7.0", "langchain-core>=0.2.0", "llama-index-core>=0.12.0"],
     },
     classifiers=[
         "License :: OSI Approved :: MIT License",
