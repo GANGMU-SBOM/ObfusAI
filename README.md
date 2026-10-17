@@ -46,7 +46,7 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
 | ⚓ **Context anchoring** | A self-describing `<obfusai-context>` block tells the model how to decode silently and not to reveal the table. English or Chinese, full or compact |
 | 🎚 **Three intensities** | `low` · `medium` · `high` (wrapped aliases, reversed definitions, decoys, shuffled table) |
 | 🧩 **Whole-request protection** | System prompt + tool descriptions share one table; tool names, parameters and enums stay intact so tool calls still work |
-| 🔌 **Drop-in integrations** | OpenAI (Chat Completions **and Responses API**) & Anthropic client wrappers — sync, async and **streaming** — plus LangChain transformer, runnable and model wrapper |
+| 🔌 **Drop-in integrations** | OpenAI (Chat Completions **and Responses API**) & Anthropic client wrappers — sync, async and **streaming** — plus LangChain and LlamaIndex adapters (document transformer, runnable/LLM wrapper, node postprocessor) |
 | 🛡 **Leak guard** | `LeakDetector` scans model output for anchors, alias definitions, aliases and protected values — and redacts them |
 | 🌊 **Streaming restore** | `StreamRestorer` decodes aliases even when they are split across chunks |
 | 📏 **Fidelity harness** | `evaluate_fidelity` replays your test cases on plaintext vs. each level and reports pass rate, leaks and size growth |
@@ -59,6 +59,7 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
 ```bash
 pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git            # core, no dependencies
 pip install "obfusai[langchain] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"   # + LangChain adapter
+pip install "obfusai[llamaindex] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"  # + LlamaIndex adapter
 ```
 
 ## 60-second tour
@@ -119,6 +120,20 @@ chain = prompt | ObfusAIProtectedModel(chat_model, ObfusAIComponent("high"))   #
 chain = prompt | ObfusAIRunnable(ObfusAIComponent("high")) | chat_model         # obfuscate only
 docs  = ObfusAIDocumentTransformer(ObfusAIComponent()).transform_documents(docs)  # RAG playbooks
 ```
+
+### LlamaIndex
+
+```python
+from obfusai.adapters.llamaindex import ObfusAILLM, ObfusAINodePostprocessor
+
+llm = ObfusAILLM(OpenAI(model="gpt-4o"), ObfusAIComponent("high", seed="my-secret"), system_prompt=SYSTEM)
+engine = index.as_query_engine(
+    llm=llm,                                              # system prompt obfuscated, replies decoded (stream/async too)
+    node_postprocessors=[ObfusAINodePostprocessor()],     # retrieved chunks obfuscated *after* retrieval
+)
+```
+
+Obfuscate at query time with the postprocessor so retrieval still runs on readable text; `ObfusAITransform` (ingestion) stores obfuscated text, which embeds poorly. Set `system_prompt` on the wrapper, not on the wrapped LLM; tool-calling (`FunctionCallingLLM`) methods are not forwarded; node metadata is only obfuscated with `obfuscate_metadata=True`.
 
 ## Intensity levels
 
@@ -212,7 +227,7 @@ flowchart LR
 
 ## Roadmap
 
-LlamaIndex adapter · per-field policies · richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
+per-field policies · richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
 
 ## Development
 
