@@ -71,17 +71,19 @@ def _protect_messages(
 ) -> Tuple[List[ChatMessage], Mapping[str, str]]:
     """Obfuscate the text of ``roles`` messages with one table; returns copies and the table."""
     copies: List[ChatMessage] = [m.model_copy(deep=True) for m in messages]
-    blocks: List[Any] = []
+    blocks: List[Tuple[Any, str]] = []  # (text block, policy field = role name)
     first_target: Optional[ChatMessage] = None
     for message in copies:
         if message.role not in roles:
             continue
-        first_target = first_target or message
-        blocks.extend(b for b in message.blocks if getattr(b, "block_type", None) == "text")
+        field = message.role.value
+        if first_target is None and not component.is_skipped(field):
+            first_target = message
+        blocks.extend((b, field) for b in message.blocks if getattr(b, "block_type", None) == "text")
 
-    session = component.session(b.text for b in blocks)
-    for block in blocks:
-        block.text = session.encode(block.text)
+    session = component.session(b.text for b, _ in blocks)
+    for block, field in blocks:
+        block.text = session.encode(block.text, field)
     anchor = session.anchor
     if not anchor:
         return copies, {}
@@ -241,7 +243,7 @@ class ObfusAILLM(LLM):
         if not self.protect_completions:
             return prompt, {}
         session = self.component.session([prompt])
-        encoded = session.encode(prompt)
+        encoded = session.encode(prompt, "prompt")
         return session.decorate(encoded), session.mapping
 
     # -- chat
@@ -311,9 +313,9 @@ def _obfuscate_node(
         [k for k, v in clone.metadata.items() if isinstance(v, str)] if obfuscate_metadata else []
     )
     session = component.session([clone.text] + [clone.metadata[k] for k in metadata_keys])
-    clone.text = session.encode(clone.text)
+    clone.text = session.encode(clone.text, "nodes")
     for key in metadata_keys:
-        clone.metadata[key] = session.encode(clone.metadata[key])
+        clone.metadata[key] = session.encode(clone.metadata[key], "nodes")
     if include_anchor:
         clone.text = session.decorate(clone.text)
     else:

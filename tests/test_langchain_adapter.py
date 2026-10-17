@@ -68,3 +68,13 @@ def test_protected_model_round_trip_and_stream() -> None:
 
     chunks = list(model.stream(prompt.invoke({"q": "go"})))
     assert "".join(c.content for c in chunks) == "Watching edge_bps closely"
+
+
+def test_policies_apply_to_langchain_message_types_and_documents() -> None:
+    from obfusai import FieldPolicy
+
+    engine = ObfusAIComponent("low", seed="s", policies={"system": FieldPolicy(skip=True), "documents": FieldPolicy(extra_detectors=["emails"])})
+    msgs = ObfusAIRunnable(engine).invoke([SystemMessage(content="limit_x = 42.5")])
+    assert msgs[0].content == "limit_x = 42.5"
+    doc = ObfusAIDocumentTransformer(engine).transform_documents([Document(page_content="mail a@b.example")])[0]
+    assert "a@b.example" not in doc.page_content.split("<obfusai-context")[0]

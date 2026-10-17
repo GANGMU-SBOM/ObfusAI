@@ -43,6 +43,7 @@ from .anchor import DECOY_VALUE as _DECOY_VALUE
 
 __all__ = [
     "DETECTORS",
+    "FieldPolicy",
     "Intensity",
     "ObfusAIComponent",
     "ObfuscatedPayload",
@@ -173,6 +174,41 @@ class ObfuscationStats:
         if not self.source_chars:
             return 1.0
         return (self.text_chars + self.anchor_chars) / self.source_chars
+
+
+@dataclass(frozen=True)
+class FieldPolicy:
+    """Per-field overrides, selected by the name of the prompt field being encoded.
+
+    Field names used by the built-in integrations: message roles (``"system"``,
+    ``"developer"``, ``"user"``, ...), ``"instructions"`` (Responses API), ``"tools"``
+    (tool/function schema text), ``"documents"`` / ``"nodes"`` (RAG chunks).  The key
+    ``"*"`` is the fallback for fields without an entry.
+
+    Attributes:
+        detectors: Replace the component's detector set for this field.
+        extra_detectors: Add detectors on top (e.g. ``("emails",)``).
+        keywords: Extra terms always obfuscated here (added to the component's).
+        protected: Extra terms never obfuscated here (added to the component's).
+        rules: Extra regexes always obfuscated here (added to the component's).
+        skip: Leave this field completely untouched.
+    """
+
+    detectors: Optional[Iterable[str]] = None
+    extra_detectors: Iterable[str] = ()
+    keywords: Iterable[str] = ()
+    protected: Iterable[str] = ()
+    rules: Iterable[Union[str, Pattern[str]]] = ()
+    skip: bool = False
+
+
+@dataclass(frozen=True)
+class _CompiledPolicy:
+    detectors: FrozenSet[str]
+    keyword_re: Optional[Pattern[str]]
+    protected_re: Optional[Pattern[str]]
+    rules: Tuple[Pattern[str], ...]
+    skip: bool
 
 
 @dataclass(frozen=True)
@@ -324,15 +360,23 @@ class ObfuscationSession:
             self._mapping[token] = value
         return token
 
-    def encode(self, text: Optional[str]) -> str:
-        """Obfuscate ``text`` using (and extending) this session's alias table."""
+    def encode(self, text: Optional[str], field: Optional[str] = None) -> str:
+        """Obfuscate ``text`` using (and extending) this session's alias table.
+
+        ``field`` selects a :class:`FieldPolicy` of the component (e.g. ``"system"``,
+        ``"tools"``); without a matching policy the component defaults apply.
+        """
         if text is None or text == "":
             return ""
         if not isinstance(text, str):
             raise TypeError(f"expected str, got {type(text).__name__}")
         self._source_chars += len(text)
+        policy = self._component._policy_for(field)
+        if policy is not None and policy.skip:
+            self._text_chars += len(text)
+            return text
         try:
-            spans = self._component._extract(text, self._profile, self._warnings)
+            spans = self._component._extract(text, self._profile, self._warnings, policy)
         except Exception as exc:  # pragma: no cover - defensive, extraction is regex-only
             self._warnings.append(f"extraction aborted: {exc.__class__.__name__}")
             spans = []
@@ -386,6 +430,9 @@ class ObfusAIComponent:
         anchor_language: Language of the decoding instructions, ``"en"`` or ``"zh"``.
         anchor_style: ``"full"`` (default) or ``"compact"`` (shorter instructions,
             fewer tokens, slightly less guidance for weaker models).
+        policies: ``{field: FieldPolicy}`` overrides, e.g. leave tool descriptions
+            alone (``{"tools": FieldPolicy(skip=True)}``) or hide e-mails only in
+            system prompts.  See :class:`FieldPolicy` for field names.
     """
 
     def __init__(
@@ -402,6 +449,7 @@ class ObfusAIComponent:
         anchor_position: str = "append",
         anchor_language: str = "en",
         anchor_style: str = "full",
+        policies: Optional[Mapping[str, FieldPolicy]] = None,
     ) -> None:
         try:
             self.intensity: Intensity = (
@@ -438,6 +486,9 @@ class ObfusAIComponent:
         self._keyword_re = self._compile_terms(keywords)
         self._protected_re = self._compile_terms(protected)
         self._rules = self._compile_rules(rules)
+        self._policies: Dict[str, _CompiledPolicy] = {
+            field: self._compile_policy(field, policy) for field, policy in (policies or {}).items()
+        }
 
     # ------------------------------------------------------------------ public API
 
@@ -450,8 +501,8 @@ class ObfusAIComponent:
         corpus = [t for t in texts if isinstance(t, str)]
         return ObfuscationSession(self, corpus)
 
-    def obfuscate(self, text: Optional[str]) -> ObfuscationResult:
-        """Obfuscate one text and build its anchor.
+    def obfuscate(self, text: Optional[str], field: Optional[str] = None) -> ObfuscationResult:
+        """Obfuscate one text and build its anchor (``field`` selects a :class:`FieldPolicy`).
 
         Empty or ``None`` input yields an empty result.  Text with nothing to
         obfuscate is returned unchanged with an empty anchor.
@@ -460,7 +511,7 @@ class ObfusAIComponent:
         if source is None:
             raise TypeError(f"expected str or None, got {type(text).__name__}")
         session = self.session([source])
-        encoded = session.encode(source)
+        encoded = session.encode(source, field)
         return ObfuscationResult(
             text=encoded,
             anchor=session.anchor,
@@ -519,18 +570,19 @@ class ObfusAIComponent:
             else:
                 style = "anthropic" if ("system" in body or anthropic_tools) else "openai"
 
-        slots: List[Tuple[Any, Any]] = []  # (container, key) of each string to encode
+        slots: List[_Slot] = []  # (container, key, field) of each string to encode
         messages = body.get("input") if style == "responses" else body.get("messages")
         if isinstance(messages, list):
             for message in messages:
                 if isinstance(message, dict) and message.get("role") in roles:
-                    _collect_content(message, "content", slots)
-        _collect_content(body, "instructions" if style == "responses" else "system", slots)
+                    _collect_content(message, "content", slots, str(message["role"]))
+        top_field = "instructions" if style == "responses" else "system"
+        _collect_content(body, top_field, slots, top_field)
         _collect_schema_text(body.get("tools"), text_keys, slots)
 
-        session = self.session(c[k] for c, k in slots)
-        for container, key in slots:
-            container[key] = session.encode(container[key])
+        session = self.session(c[k] for c, k, _ in slots)
+        for container, key, field in slots:
+            container[key] = session.encode(container[key], field)
 
         anchor = session.anchor
         if anchor:
@@ -565,11 +617,45 @@ class ObfusAIComponent:
                 raise TypeError(f"rules must be str or compiled patterns, got {type(rule).__name__}")
         return tuple(compiled)
 
-    def _extract(self, text: str, profile: _Profile, warnings: List[str]) -> List[_Span]:
+    def _compile_policy(self, field: str, policy: FieldPolicy) -> _CompiledPolicy:
+        if not isinstance(policy, FieldPolicy):
+            raise TypeError(f"policies[{field!r}] must be a FieldPolicy, got {type(policy).__name__}")
+        base = self.detectors if policy.detectors is None else frozenset(policy.detectors)
+        chosen = base | frozenset(policy.extra_detectors)
+        unknown = sorted(chosen - set(DETECTORS))
+        if unknown:
+            raise ValueError(f"policies[{field!r}]: unknown detectors {unknown}; choose from {list(DETECTORS)}")
+        return _CompiledPolicy(
+            detectors=chosen,
+            keyword_re=self._compile_terms(policy.keywords),
+            protected_re=self._compile_terms(policy.protected),
+            rules=self._compile_rules(policy.rules),
+            skip=policy.skip,
+        )
+
+    def is_skipped(self, field: Optional[str]) -> bool:
+        """True when the policy for ``field`` leaves it untouched (``FieldPolicy(skip=True)``)."""
+        policy = self._policy_for(field)
+        return policy is not None and policy.skip
+
+    def _policy_for(self, field: Optional[str]) -> Optional[_CompiledPolicy]:
+        if not self._policies:
+            return None
+        return self._policies.get(field or "") or self._policies.get("*")
+
+    def _extract(
+        self,
+        text: str,
+        profile: _Profile,
+        warnings: List[str],
+        policy: Optional[_CompiledPolicy] = None,
+    ) -> List[_Span]:
         """Return non-overlapping spans to replace, in text order."""
         blocked: List[Tuple[int, int]] = [m.span() for m in _PROTECTED_RE.finditer(text)]
-        if self._protected_re is not None:
-            blocked.extend(m.span() for m in self._protected_re.finditer(text))
+        for protected_re in (self._protected_re, policy.protected_re if policy else None):
+            if protected_re is not None:
+                blocked.extend(m.span() for m in protected_re.finditer(text))
+        detectors = policy.detectors if policy else self.detectors
 
         # Insertion order breaks ties: when two spans start together the longer wins,
         # and between equals the earlier-added source (keywords, rules, detectors) wins.
@@ -591,10 +677,12 @@ class ObfusAIComponent:
                 warnings.append(f"pattern skipped: {exc.__class__.__name__}")
 
         add(self._keyword_re, "keywords")
-        for rule in self._rules:
+        if policy:
+            add(policy.keyword_re, "keywords")
+        for rule in self._rules + (policy.rules if policy else ()):
             add(rule, "rules", groups_only=rule.groups > 0)
         for name in DETECTORS:
-            if name in self.detectors:
+            if name in detectors:
                 for pattern, groups_only in _DETECTOR_PATTERNS[name]:
                     add(pattern, name, groups_only)
 
@@ -663,7 +751,14 @@ class ObfusAIComponent:
                 target = None
                 if instructions is None and isinstance(items, list):
                     target = next(
-                        (i for i in items if isinstance(i, dict) and i.get("role") in roles), None
+                        (
+                            i
+                            for i in items
+                            if isinstance(i, dict)
+                            and i.get("role") in roles
+                            and not self.is_skipped(str(i["role"]))
+                        ),
+                        None,
                     )
                 if target is None:
                     body["instructions"] = _join_anchor(instructions or "", anchor, position)
@@ -695,6 +790,8 @@ class ObfusAIComponent:
         for message in messages:
             if not (isinstance(message, dict) and message.get("role") in roles):
                 continue
+            if self.is_skipped(str(message["role"])):
+                continue  # a skipped field stays byte-for-byte untouched, anchor included
             content = message.get("content")
             if isinstance(content, str) or content is None:
                 message["content"] = _join_anchor(content or "", anchor, position)
@@ -714,26 +811,27 @@ def _check_choice(name: str, value: str, choices: Sequence[str]) -> None:
         raise ValueError(f"{name} must be one of {list(choices)}; got {value!r}")
 
 
-def _collect_content(container: Any, key: str, slots: List[Tuple[Any, Any]]) -> None:
+_Slot = Tuple[Any, Any, str]  # (container, key, policy field)
+
+
+def _collect_content(container: Any, key: str, slots: List[_Slot], field: str) -> None:
     """Record every text slot of a message ``content`` / ``system`` value."""
     value = container.get(key) if isinstance(container, dict) else None
     if isinstance(value, str):
-        slots.append((container, key))
+        slots.append((container, key, field))
     elif isinstance(value, list):
         for part in value:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
-                slots.append((part, "text"))
+                slots.append((part, "text", field))
 
 
-def _collect_schema_text(
-    node: Any, text_keys: Sequence[str], slots: List[Tuple[Any, Any]]
-) -> None:
+def _collect_schema_text(node: Any, text_keys: Sequence[str], slots: List[_Slot]) -> None:
     """Record string values stored under ``text_keys`` anywhere inside tool schemas."""
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(value, str):
                 if key in text_keys:
-                    slots.append((node, key))
+                    slots.append((node, key, "tools"))
             else:
                 _collect_schema_text(value, text_keys, slots)
     elif isinstance(node, list):

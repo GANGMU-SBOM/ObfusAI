@@ -223,3 +223,14 @@ def test_query_engine_end_to_end() -> None:
         for message in call:
             visible = strip_anchors(str(message.content))
             assert "edge_bps" not in visible and "project_falcon" not in visible
+
+
+def test_policies_apply_to_roles_and_nodes() -> None:
+    from obfusai import FieldPolicy
+
+    engine = ObfusAIComponent("low", seed="s", policies={"system": FieldPolicy(skip=True), "nodes": FieldPolicy(skip=True)})
+    inner = FakeLLM(seen=[])
+    ObfusAILLM(inner, engine).chat(_messages())
+    assert inner.seen[0][0].content == SYSTEM  # system skipped -> sent untouched
+    node = ObfusAINodePostprocessor(engine).postprocess_nodes(_nodes(), QueryBundle("q"))[0].node
+    assert node.text == _nodes()[0].node.text

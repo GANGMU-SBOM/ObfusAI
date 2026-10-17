@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from obfusai import LeakDetector, ObfusAIComponent, StreamRestorer  # noqa: E402
+from obfusai import FieldPolicy, LeakDetector, ObfusAIComponent, StreamRestorer  # noqa: E402
 from obfusai.evaluation import FidelityCase, evaluate_fidelity  # noqa: E402
 from obfusai.testing import DecodingMockLLM  # noqa: E402
 
@@ -34,6 +34,18 @@ result = engine.obfuscate(PROMPT)
 print("== obfuscated prompt ==")
 print(result.prompt)
 print(f"\naliases={result.stats.aliases}  size x{result.stats.growth:.2f}\n")
+
+# 1b. Per-field policies: obfuscate the system prompt, leave tool descriptions readable -------
+policy_engine = ObfusAIComponent(
+    "medium", seed="demo-secret", policies={"tools": FieldPolicy(skip=True)}
+)
+request = policy_engine.obfuscate_payload(
+    {
+        "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": "go"}],
+        "tools": [{"type": "function", "function": {"name": "get_signal", "description": "Reads edge_bps."}}],
+    }
+)
+print("tool description kept ->", request.payload["tools"][0]["function"]["description"], "\n")
 
 # 2. Output guard: catch a model that leaks the prompt ---------------------------------
 guard = LeakDetector(result.mapping, session_ids=[result.session_id])

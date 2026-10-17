@@ -159,6 +159,25 @@ ObfusAIComponent(
 )
 ```
 
+### Per-field policies
+
+Different parts of a request deserve different treatment: hide proprietary numbers in the system prompt, but leave tool descriptions readable if your model picks tools more reliably that way.
+
+```python
+from obfusai import FieldPolicy
+
+engine = ObfusAIComponent(
+    "high",
+    policies={
+        "system": FieldPolicy(extra_detectors=["emails"], keywords=["Helios"]),  # add to this field only
+        "tools":  FieldPolicy(skip=True),                                         # leave untouched
+        "*":      FieldPolicy(detectors=["numbers"]),                             # fallback for other fields
+    },
+)
+```
+
+Field names: message roles (`system`, `developer`, `user`, …), `instructions` (Responses API), `tools`, `documents` (LangChain), `nodes` / `prompt` (LlamaIndex). A policy's `keywords`, `protected` and `rules` add to the component-level ones; `detectors` replaces and `extra_detectors` extends the detector set. Skipped fields stay byte-for-byte untouched — the anchor is never written into them (a dedicated system message is added instead when needed). All adapters honour policies.
+
 ## Guard the output
 
 ```python
@@ -227,7 +246,7 @@ flowchart LR
 
 ## Roadmap
 
-per-field policies · richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
+richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
 
 ## Development
 
