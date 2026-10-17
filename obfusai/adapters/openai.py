@@ -13,7 +13,7 @@ servers)::
 
 System/developer messages and tool descriptions are obfuscated, the anchor is
 attached to the system prompt, and aliases found in the reply are decoded.
-Streaming replies (``stream=True``, ``n=1``) are decoded chunk by chunk.
+Streaming replies (``stream=True``, any ``n``) are decoded chunk by chunk.
 
 The Responses API is supported the same way (``instructions``, ``input`` items with
 ``system``/``developer`` roles, and flat function tools; sync, async and streaming)::
@@ -32,23 +32,16 @@ import inspect
 from typing import Any, Mapping, Optional
 
 from ..core import ObfusAIComponent
-from ..guard import arestore_stream, restore_stream
 from ._common import protect_kwargs, restore_attr
-from ._streams import ResponsesEventRestorer, arestore_events, restore_events, restore_response_output
+from ._streams import (
+    ChatChunkRestorer,
+    ResponsesEventRestorer,
+    arestore_events,
+    restore_events,
+    restore_response_output,
+)
 
 __all__ = ["ObfusAIOpenAI"]
-
-
-def _get_delta(chunk: Any) -> Optional[str]:
-    choices = getattr(chunk, "choices", None)
-    if not choices:
-        return None
-    content = getattr(getattr(choices[0], "delta", None), "content", None)
-    return content if isinstance(content, str) else None
-
-
-def _set_delta(chunk: Any, text: str) -> None:
-    chunk.choices[0].delta.content = text
 
 
 class _Completions:
@@ -72,9 +65,10 @@ class _Completions:
     @staticmethod
     def _finish(result: Any, mapping: Mapping[str, str], stream: bool) -> Any:
         if stream:
+            restorer = ChatChunkRestorer(mapping)
             if hasattr(result, "__aiter__"):
-                return arestore_stream(result, mapping, get=_get_delta, set=_set_delta)
-            return restore_stream(result, mapping, get=_get_delta, set=_set_delta)
+                return arestore_events(result, restorer)
+            return restore_events(result, restorer)
         for choice in getattr(result, "choices", None) or []:
             restore_attr(getattr(choice, "message", None), "content", mapping)
         return result

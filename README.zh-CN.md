@@ -7,11 +7,15 @@
 面向 LLM 系统提示词、角色设定与工具（Tool/Skill）Schema 的混淆中间件。
 核心零依赖 · Python 3.9+ · 支持 OpenAI · Anthropic · LangChain
 
+[![GitHub stars](https://img.shields.io/github/stars/GANGMU-SBOM/ObfusAI?style=social)](https://github.com/GANGMU-SBOM/ObfusAI/stargazers)
+[![PyPI](https://img.shields.io/pypi/v/obfusai)](https://pypi.org/project/obfusai/)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![dependencies](https://img.shields.io/badge/core%20dependencies-0-brightgreen)
 
 [English](README.md) · **简体中文**
+
+**⭐ 如果 ObfusAI 帮你守住了提示词，请[在 GitHub 上点个 Star](https://github.com/GANGMU-SBOM/ObfusAI)——只需一次点击，却能让更多开发者发现它。**
 
 </div>
 
@@ -57,9 +61,11 @@ Hard stop: drawdown_limit = 8.2%.               ……解码说明……
 ## 安装
 
 ```bash
-pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git                           # 核心，无任何依赖
-pip install "obfusai[langchain] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"    # 含 LangChain 适配器
-pip install "obfusai[llamaindex] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"   # 含 LlamaIndex 适配器
+pip install obfusai                    # 核心，无任何依赖
+pip install "obfusai[langchain]"       # 含 LangChain 适配器
+pip install "obfusai[llamaindex]"      # 含 LlamaIndex 适配器
+# 安装最新开发版：
+pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git
 ```
 
 ## 60 秒上手
@@ -141,7 +147,7 @@ engine = index.as_query_engine(
 
 | 档位 | 混淆内容 | 取舍 |
 |---|---|---|
-| `low` | 数字、百分比、货币、snake/camel/Pascal/点号标识符、自定义关键词与规则 | 锚点最小，可靠性最高 |
+| `low` | 数字、百分比、货币、日期与时间（一个日期只生成一个别名）、snake/camel/Pascal/点号标识符、自定义关键词与规则 | 锚点最小，可靠性最高 |
 | `medium`（默认） | + 引号内字符串、ACRONYM 缩写、Proper Noun 专有名词短语 | 均衡 |
 | `high` | + 领域长词、`⟦α⟧` 包裹式别名、**逆序**锚点定义、**诱饵**别名、乱序表 | 锚点最大、最难读，模型解码余量最小——**务必在你的模型上实测** |
 
@@ -278,7 +284,7 @@ flowchart LR
 
 ## 路线图
 
-日期检测器（目前日期会被拆成多个数字别名）· LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法 · `n>1` 的 Chat Completions 流式。
+LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法。
 
 ## 开发
 
@@ -290,3 +296,13 @@ python examples/basic_usage.py && python examples/advanced_usage.py
 ## 许可证
 
 MIT — 详见 [LICENSE](LICENSE)。
+
+## ⭐ 支持 ObfusAI
+
+如果这个项目帮你避免了一次提示词泄露，或者你只是喜欢这个想法：
+
+- **[给仓库点个 Star](https://github.com/GANGMU-SBOM/ObfusAI)**——成本最低、帮助最大的支持方式
+- 把它分享给正在上线 LLM 功能的同事
+- 提个 [Issue](https://github.com/GANGMU-SBOM/ObfusAI/issues)：反馈 Bug、你需要的检测器，或它在哪个模型上表现不佳
+
+[![Star History Chart](https://api.star-history.com/svg?repos=GANGMU-SBOM/ObfusAI&type=Date)](https://star-history.com/#GANGMU-SBOM/ObfusAI&Date)

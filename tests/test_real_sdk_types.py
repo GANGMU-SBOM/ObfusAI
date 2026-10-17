@@ -72,3 +72,25 @@ def test_anthropic_message_stream_helper_iteration_is_decoded() -> None:
     assert "".join(e.delta.text for e in out if e.type == "content_block_delta") == "see alpha_x ok alpha_x"
     assert wrapped.get_final_text() == "see alpha_x ok alpha_x"
     assert stream.get_final_message().content[0].text == "see alpha_x ok alpha_x"
+
+
+def test_chat_completion_chunks_real_types_two_choices() -> None:
+    pytest.importorskip("openai")
+    from openai.types.chat import ChatCompletionChunk
+    from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
+
+    from obfusai.adapters._streams import ChatChunkRestorer
+
+    def chunk(index, content, finish=None):
+        return ChatCompletionChunk(
+            id="c", created=0, model="m", object="chat.completion.chunk",
+            choices=[Choice(index=index, delta=ChoiceDelta(content=content), finish_reason=finish)],
+        )
+
+    events = [chunk(0, "see "), chunk(1, "also "), chunk(0, "α"), chunk(1, "α"), chunk(0, None, "stop"), chunk(1, None, "stop")]
+    out = list(restore_events(events, ChatChunkRestorer(MAPPING)))
+    text = {0: "", 1: ""}
+    for c in out:
+        text[c.choices[0].index] += c.choices[0].delta.content or ""
+    assert text == {0: "see alpha_x", 1: "also alpha_x"}
+    assert out[-1].choices[0].finish_reason == "stop"
