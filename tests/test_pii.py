@@ -97,3 +97,31 @@ def test_audit_cli(tmp_path, capsys) -> None:
     assert "clean" in capsys.readouterr().out
     f.write_text("nothing sensitive", encoding="utf-8")
     assert main(["audit", str(f)]) == 0
+
+
+DATES = [
+    "2024-01-05", "2024-01-05T10:30:00Z", "2024-01-05 10:30", "2024/1/5", "05/01/2024", "13/01/2024", "5.1.24",
+    "2024年1月5日", "2024年1月", "Jan 5, 2024", "March 5th", "5 January 2024", "5th March",
+    "10:30", "10:30:15", "9:05 PM", "23:59",
+]
+
+
+@pytest.mark.parametrize("value", DATES)
+def test_dates_become_one_alias(value: str) -> None:
+    assert value in hidden(f"due {value} sharp", detectors=["dates"]), value
+
+
+@pytest.mark.parametrize("text", ["2024-13-45", "1/2/3", "ratio 3:1", "v1.2.3", "ip 10.0.0.7", "at 25:99", "may be 5 or so", "Mar"])
+def test_dates_reject_lookalikes(text: str) -> None:
+    assert hidden(text, detectors=["dates"]) == set()
+
+
+def test_dates_are_in_default_profiles_and_beat_numbers() -> None:
+    for level in ("low", "medium", "high"):
+        result = ObfusAIComponent(level, seed="s").obfuscate("Review on 2024-01-05 at 10:30 for limit_x = 42.5")
+        values = set(result.mapping.values())
+        assert {"2024-01-05", "10:30", "limit_x", "42.5"} <= values
+        assert not ({"2024", "01", "05", "10", "30"} & values)
+        assert decode_with_anchor(result.prompt) == "Review on 2024-01-05 at 10:30 for limit_x = 42.5"
+    off = ObfusAIComponent("low", seed="s", detectors=["numbers"]).obfuscate("on 2024-01-05")
+    assert "2024" in off.mapping.values()  # opting out restores the old behaviour

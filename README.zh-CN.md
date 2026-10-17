@@ -141,7 +141,7 @@ engine = index.as_query_engine(
 
 | 档位 | 混淆内容 | 取舍 |
 |---|---|---|
-| `low` | 数字、百分比、货币、snake/camel/Pascal/点号标识符、自定义关键词与规则 | 锚点最小，可靠性最高 |
+| `low` | 数字、百分比、货币、日期与时间（一个日期只生成一个别名）、snake/camel/Pascal/点号标识符、自定义关键词与规则 | 锚点最小，可靠性最高 |
 | `medium`（默认） | + 引号内字符串、ACRONYM 缩写、Proper Noun 专有名词短语 | 均衡 |
 | `high` | + 领域长词、`⟦α⟧` 包裹式别名、**逆序**锚点定义、**诱饵**别名、乱序表 | 锚点最大、最难读，模型解码余量最小——**务必在你的模型上实测** |
 
@@ -278,7 +278,7 @@ flowchart LR
 
 ## 路线图
 
-日期检测器（目前日期会被拆成多个数字别名）· LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法 · `n>1` 的 Chat Completions 流式。
+LlamaIndex `FunctionCallingLLM` / 工具 Schema · OpenAI `responses.parse` / `responses.stream` 辅助方法。
 
 ## 开发
 

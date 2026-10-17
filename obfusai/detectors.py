@@ -4,6 +4,9 @@ Each detector is a regex plus an optional validator that rejects look-alikes
 (a 16-digit number that fails the Luhn check is not a card number).  They are
 used through ``ObfusAIComponent(extra_detectors=[...])`` and :func:`obfusai.audit.audit`.
 
+Also here: ``dates`` (ISO, numeric, month-name and Chinese dates with optional times),
+which the default intensities use so a date becomes one alias instead of three numbers.
+
 Names: ``phones`` (international and common national formats written with a ``+``
 or separators), ``cn_phones`` (mainland-China mobile numbers), ``cards`` (Luhn),
 ``ssn`` (US), ``cn_ids`` (18-digit resident ID with checksum), ``ibans`` (mod-97),
@@ -71,6 +74,33 @@ def iban_ok(value: str) -> bool:
     return int(numeric) % 97 == 1
 
 
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def date_ok(value: str) -> bool:
+    """Reject look-alikes such as ``1/2/3`` or ``2024-13-45``; times and month-name dates pass."""
+    numeric = re.match(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", value)
+    if numeric:
+        year, month, day = (int(g) for g in numeric.groups())
+    else:
+        short = re.fullmatch(r"(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})", value)
+        if not short:
+            clock = re.match(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", value)
+            if clock:  # bare time such as "25:99" is not a time
+                hour, minute, second = clock.group(1), clock.group(2), clock.group(3) or "0"
+                return int(hour) <= 24 and int(minute) <= 59 and int(second) <= 59
+            return True  # month-name dates were fully matched by their pattern
+        first, second, year = (int(g) for g in short.groups())
+        month, day = (first, second) if first <= 12 else (second, first)
+        if len(short.group(3)) == 2:
+            year += 2000
+    try:
+        date(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
 def phone_ok(value: str) -> bool:
     digits = _digits(value)
     if not 9 <= len(digits) <= 15:
@@ -79,7 +109,26 @@ def phone_ok(value: str) -> bool:
     return value.startswith("+") or any(ch in value for ch in "()-.")
 
 
+_MONTH_NAME = r"(?:" + "|".join(m + r"[a-z]*\.?" for m in _MONTHS) + r")"
+_TIME = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s?[AaPp]\.?[Mm]\.?)?"
+
 PATTERNS: Dict[str, Tuple[Tuple[Pattern[str], bool], ...]] = {
+    "dates": tuple(
+        (re.compile(p), False)
+        for p in (
+            # 2024-01-05, 2024-01-05T10:30:00Z, 2024/1/5 10:30
+            r"(?<![\w.])\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]" + _TIME + r"(?:Z|[+-]\d{2}:?\d{2})?)?(?![\w])",
+            # 05/01/2024, 5.1.24
+            r"(?<![\w.])\d{1,2}[/.]\d{1,2}[/.]\d{2,4}(?![\w/.])",
+            # 2024年1月5日
+            r"\d{4}年\d{1,2}月(?:\d{1,2}日?)?",
+            # Jan 5, 2024 / March 5th / 5 January 2024
+            r"\b" + _MONTH_NAME + r" \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?\b",
+            r"\b\d{1,2}(?:st|nd|rd|th)? " + _MONTH_NAME + r"(?: \d{4})?\b",
+            # 10:30, 10:30:15, 9:05 PM
+            r"(?<![\w:.])" + _TIME + r"(?![\w:])",
+        )
+    ),
     "secrets": tuple(
         (re.compile(p), False)
         for p in (
@@ -105,6 +154,7 @@ PATTERNS: Dict[str, Tuple[Tuple[Pattern[str], bool], ...]] = {
 }
 
 VALIDATORS: Dict[str, Callable[[str], bool]] = {
+    "dates": date_ok,
     "cards": luhn_ok,
     "ssn": ssn_ok,
     "cn_ids": cn_id_ok,

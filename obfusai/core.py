@@ -126,7 +126,7 @@ _DETECTOR_PATTERNS: Dict[str, Tuple[Tuple[Pattern[str], bool], ...]] = {
     "urls": ((_URL_RE, False),),
     "ips": ((_IP_RE, False),),
     # specific, checksum-validated formats come before the generic "numbers" so they win ties
-    **{name: _pii.PATTERNS[name] for name in ("secrets", "uuids", "cards", "ssn", "cn_ids", "cn_phones", "ibans", "phones")},
+    **{name: _pii.PATTERNS[name] for name in ("secrets", "uuids", "cards", "ssn", "cn_ids", "cn_phones", "ibans", "phones", "dates")},
     "numbers": ((_NUMBER_RE, False),),
     "phrases": ((_TITLE_PHRASE_RE, False),),
     "acronyms": ((_ACRONYM_RE, False),),
@@ -149,13 +149,13 @@ class _Profile:
 
 
 _PROFILES: Dict[Intensity, _Profile] = {
-    Intensity.LOW: _Profile(frozenset({"identifiers", "numbers"}), 0, False, False, False),
+    Intensity.LOW: _Profile(frozenset({"identifiers", "numbers", "dates"}), 0, False, False, False),
     Intensity.MEDIUM: _Profile(
-        frozenset({"identifiers", "numbers", "quoted", "phrases", "acronyms"}),
+        frozenset({"identifiers", "numbers", "dates", "quoted", "phrases", "acronyms"}),
         0, False, False, False,
     ),
     Intensity.HIGH: _Profile(
-        frozenset({"identifiers", "numbers", "quoted", "phrases", "acronyms", "words"}),
+        frozenset({"identifiers", "numbers", "dates", "quoted", "phrases", "acronyms", "words"}),
         4, True, True, True,
     ),
 }

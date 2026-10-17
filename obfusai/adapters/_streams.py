@@ -16,6 +16,7 @@ from ._common import restore_attr
 
 __all__ = [
     "AnthropicEventRestorer",
+    "ChatChunkRestorer",
     "MessageStreamEventRestorer",
     "ResponsesEventRestorer",
     "arestore_events",
@@ -164,6 +165,61 @@ class MessageStreamEventRestorer:
                 out.extend(self._drain(index))
             restore_message_content(getattr(getattr(event, "message", None), "content", None), self.mapping)
         out.append(event)
+        return out
+
+    def finish(self) -> List[Any]:
+        out: List[Any] = []
+        for index in list(self._restorers):
+            out.extend(self._drain(index))
+        return out
+
+
+class ChatChunkRestorer:
+    """Stateful decoder for Chat Completions stream chunks, one alias buffer per choice.
+
+    Works for any ``n``: deltas are decoded per ``choice.index``.  Text still held
+    back when a choice finishes (``finish_reason`` set) is emitted as a synthetic
+    chunk carrying only that choice, placed right before the chunk that finishes it;
+    leftovers at the end of the stream are emitted last.
+    """
+
+    def __init__(self, mapping: Mapping[str, str]) -> None:
+        self.mapping = dict(mapping)
+        self._restorers: Dict[int, StreamRestorer] = {}
+        self._templates: Dict[int, Tuple[Any, Any]] = {}  # index -> (chunk, choice)
+
+    def _drain(self, index: int) -> List[Any]:
+        restorer = self._restorers.pop(index, None)
+        template = self._templates.pop(index, None)
+        if restorer is None or template is None:
+            return []
+        tail = restorer.flush()
+        if not tail:
+            return []
+        chunk, choice = template
+        new_choice = _clone(choice)
+        new_choice.delta = _clone(choice.delta)
+        new_choice.delta.content = tail
+        new_choice.finish_reason = None
+        synthetic = _clone(chunk)
+        synthetic.choices = [new_choice]
+        if getattr(synthetic, "usage", None) is not None:
+            synthetic.usage = None
+        return [synthetic]
+
+    def process(self, chunk: Any) -> List[Any]:
+        out: List[Any] = []
+        for choice in getattr(chunk, "choices", None) or []:
+            index = getattr(choice, "index", 0)
+            delta = getattr(choice, "delta", None)
+            content = getattr(delta, "content", None)
+            if isinstance(content, str):
+                restorer = self._restorers.setdefault(index, StreamRestorer(self.mapping))
+                delta.content = restorer.feed(content)
+                self._templates[index] = (chunk, choice)
+            if getattr(choice, "finish_reason", None) is not None:
+                out.extend(self._drain(index))
+        out.append(chunk)
         return out
 
     def finish(self) -> List[Any]:

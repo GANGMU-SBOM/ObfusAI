@@ -429,3 +429,41 @@ def test_message_stream_async_event_iteration() -> None:
         return "".join([e.text async for e in wrapped if e.type == "text"])
 
     assert asyncio.run(run()) == "The metric edge_bps matters."
+
+
+def _chat_chunks(texts: dict, size: int) -> list:
+    """Interleaved Chat Completions chunks for several choices; each choice finishes in its own chunk."""
+    chunks = []
+    pieces = {i: [t[k : k + size] for k in range(0, len(t), size)] for i, t in texts.items()}
+    for step in range(max(len(p) for p in pieces.values())):
+        for index, parts in pieces.items():
+            if step < len(parts):
+                chunks.append(NS(choices=[NS(index=index, delta=NS(content=parts[step]), finish_reason=None)]))
+    for index in texts:
+        chunks.append(NS(choices=[NS(index=index, delta=NS(content=None), finish_reason="stop")]))
+    return chunks
+
+
+@pytest.mark.parametrize("size", [1, 3, 100])
+def test_chat_chunk_restorer_handles_multiple_choices(size: int) -> None:
+    from obfusai.adapters._streams import ChatChunkRestorer, restore_events
+
+    mapping = {"α": "edge_bps", "β": "limit_x"}
+    texts = {0: "The metric α matters.", 1: "Also β here."}
+    out = list(restore_events(_chat_chunks(texts, size), ChatChunkRestorer(mapping)))
+    got = {0: "", 1: ""}
+    order = []
+    for chunk in out:
+        for choice in chunk.choices:
+            got[choice.index] += choice.delta.content or ""
+            order.append((choice.index, choice.finish_reason))
+    assert got == {0: "The metric edge_bps matters.", 1: "Also limit_x here."}
+    for index in (0, 1):  # no text after a choice's finish chunk
+        assert order.index((index, "stop")) == max(i for i, (ix, _) in enumerate(order) if ix == index)
+
+
+def test_openai_wrapper_streams_with_n_greater_than_one() -> None:
+    fake = FakeOpenAI(stream_size=2)
+    client = ObfusAIOpenAI(fake, ObfusAIComponent("low", seed="s"))
+    chunks = list(client.chat.completions.create(stream=True, n=2, **_kwargs()))
+    assert "".join(c.choices[0].delta.content or "" for c in chunks) == "The metric edge_bps matters."

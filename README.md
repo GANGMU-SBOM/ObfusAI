@@ -140,7 +140,7 @@ Obfuscate at query time with the postprocessor so retrieval still runs on readab
 
 | Level | Obfuscates | Trade-off |
 |---|---|---|
-| `low` | numbers, %, currency, snake/camel/Pascal/dotted identifiers, your keywords & rules | smallest anchor, highest reliability |
+| `low` | numbers, %, currency, dates & times (one alias per date), snake/camel/Pascal/dotted identifiers, your keywords & rules | smallest anchor, highest reliability |
 | `medium` *(default)* | + quoted strings, ACRONYMS, Proper Noun Phrases | balanced |
 | `high` | + long domain words, `⟦α⟧`-wrapped aliases, **reversed** anchor definitions, **decoy** aliases, shuffled table | biggest anchor, hardest to read, lowest decoding margin — **measure it on your model** |
 
@@ -277,7 +277,7 @@ flowchart LR
 
 ## Roadmap
 
-Date detector (dates are currently split into number aliases) · LlamaIndex `FunctionCallingLLM` / tool schemas · OpenAI `responses.parse`/`responses.stream` helpers · Chat Completions streaming with `n>1`.
+LlamaIndex `FunctionCallingLLM` / tool schemas · OpenAI `responses.parse` / `responses.stream` helpers.
 
 ## Development
 
