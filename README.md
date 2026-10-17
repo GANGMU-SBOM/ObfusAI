@@ -7,11 +7,15 @@
 Obfuscation middleware for LLM system prompts, roles and tool schemas.
 Zero dependencies · Python 3.9+ · OpenAI · Anthropic · LangChain
 
+[![GitHub stars](https://img.shields.io/github/stars/GANGMU-SBOM/ObfusAI?style=social)](https://github.com/GANGMU-SBOM/ObfusAI/stargazers)
+[![PyPI](https://img.shields.io/pypi/v/obfusai)](https://pypi.org/project/obfusai/)
 ![python](https://img.shields.io/badge/python-3.9%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![dependencies](https://img.shields.io/badge/core%20dependencies-0-brightgreen)
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [简体中文](https://github.com/GANGMU-SBOM/ObfusAI/blob/main/README.zh-CN.md)
+
+**⭐ If ObfusAI keeps your prompts safe, [give it a star on GitHub](https://github.com/GANGMU-SBOM/ObfusAI) — it takes one click and helps other developers find it.**
 
 </div>
 
@@ -57,9 +61,11 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
 ## Install
 
 ```bash
-pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git            # core, no dependencies
-pip install "obfusai[langchain] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"   # + LangChain adapter
-pip install "obfusai[llamaindex] @ git+https://github.com/GANGMU-SBOM/ObfusAI.git"  # + LlamaIndex adapter
+pip install obfusai                    # core, no dependencies
+pip install "obfusai[langchain]"       # + LangChain adapter
+pip install "obfusai[llamaindex]"      # + LlamaIndex adapter
+# latest development version:
+pip install git+https://github.com/GANGMU-SBOM/ObfusAI.git
 ```
 
 ## 60-second tour
@@ -288,4 +294,14 @@ python examples/basic_usage.py && python examples/advanced_usage.py
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/GANGMU-SBOM/ObfusAI/blob/main/LICENSE).
+
+## ⭐ Support ObfusAI
+
+If this project saved you from a leaked prompt, or you simply like the idea:
+
+- **[Star the repository](https://github.com/GANGMU-SBOM/ObfusAI)** — the cheapest, most useful way to help
+- Share it with a teammate who ships LLM features
+- Open an [issue](https://github.com/GANGMU-SBOM/ObfusAI/issues) with a bug, a detector you need or a model it struggles with
+
+[![Star History Chart](https://api.star-history.com/svg?repos=GANGMU-SBOM/ObfusAI&type=Date)](https://star-history.com/#GANGMU-SBOM/ObfusAI&Date)
