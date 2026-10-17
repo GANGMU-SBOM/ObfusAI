@@ -499,28 +499,33 @@ class ObfusAIComponent:
 
         Args:
             payload: Request body (not mutated).
-            style: ``"openai"``, ``"anthropic"`` or ``"auto"``.
+            style: ``"openai"`` (chat completions), ``"anthropic"``, ``"responses"``
+                (OpenAI Responses API: ``instructions`` / ``input`` / flat ``tools``)
+                or ``"auto"``.
             roles: Message roles whose content is obfuscated.
             text_keys: Schema keys whose string values are obfuscated.
         """
         if not isinstance(payload, Mapping):
             raise TypeError("payload must be a mapping")
-        _check_choice("style", style, ("auto", "openai", "anthropic"))
+        _check_choice("style", style, ("auto", "openai", "anthropic", "responses"))
         body: Dict[str, Any] = copy.deepcopy(dict(payload))
         if style == "auto":
             tools = body.get("tools")
             anthropic_tools = isinstance(tools, list) and any(
                 isinstance(t, dict) and "input_schema" in t for t in tools
             )
-            style = "anthropic" if ("system" in body or anthropic_tools) else "openai"
+            if "messages" not in body and ("instructions" in body or "input" in body):
+                style = "responses"
+            else:
+                style = "anthropic" if ("system" in body or anthropic_tools) else "openai"
 
         slots: List[Tuple[Any, Any]] = []  # (container, key) of each string to encode
-        messages = body.get("messages")
+        messages = body.get("input") if style == "responses" else body.get("messages")
         if isinstance(messages, list):
             for message in messages:
                 if isinstance(message, dict) and message.get("role") in roles:
                     _collect_content(message, "content", slots)
-        _collect_content(body, "system", slots)
+        _collect_content(body, "instructions" if style == "responses" else "system", slots)
         _collect_schema_text(body.get("tools"), text_keys, slots)
 
         session = self.session(c[k] for c, k in slots)
@@ -651,6 +656,28 @@ class ObfusAIComponent:
         self, body: Dict[str, Any], anchor: str, style: str, roles: Sequence[str]
     ) -> None:
         position = self.anchor_position
+        if style == "responses":
+            instructions = body.get("instructions")
+            if isinstance(instructions, str) or instructions is None:
+                items = body.get("input")
+                target = None
+                if instructions is None and isinstance(items, list):
+                    target = next(
+                        (i for i in items if isinstance(i, dict) and i.get("role") in roles), None
+                    )
+                if target is None:
+                    body["instructions"] = _join_anchor(instructions or "", anchor, position)
+                    return
+                content = target.get("content")
+                if isinstance(content, str) or content is None:
+                    target["content"] = _join_anchor(content or "", anchor, position)
+                elif isinstance(content, list):
+                    part = {"type": "input_text", "text": anchor}
+                    if position == "prepend":
+                        content.insert(0, part)
+                    else:
+                        content.append(part)
+            return
         if style == "anthropic":
             system = body.get("system")
             if isinstance(system, str) or system is None:

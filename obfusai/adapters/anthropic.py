@@ -13,22 +13,164 @@ exposes ``messages.create``::
 The ``system`` prompt and tool descriptions are obfuscated, the anchor is added to
 the system prompt, and aliases found in text blocks of the reply are decoded.
 
-Streaming: ``messages.create(stream=True)`` is rejected while response restoration is
-on, because aliases split across stream events cannot be decoded safely at this
-layer; pass ``restore_responses=False`` and decode with
-:class:`obfusai.guard.StreamRestorer` instead.  ``messages.stream(...)`` protects the
-request and returns the SDK's stream manager unchanged.
+Streaming is decoded too:
+
+* ``messages.create(stream=True)`` returns the raw event stream with every
+  ``text_delta`` decoded (aliases split across events included).
+* ``with client.messages.stream(...) as stream`` returns a stream whose
+  ``text_stream``, ``get_final_message()`` and ``get_final_text()`` are decoded.
+  Iterating raw events from this helper is not supported (use ``text_stream`` or
+  ``create(stream=True)``); ``current_message_snapshot`` stays undecoded.
+
+Protected entry points are ``messages.create`` and ``messages.stream``.  Other
+``messages`` methods are blocked, except ``count_tokens``, so a prompt can never
+leave through an unprotected endpoint by accident; other client attributes are
+forwarded untouched and are **not** protected.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Mapping, Optional
+from typing import Any, AsyncIterator, Iterator, Mapping, Optional
 
 from ..core import ObfusAIComponent
-from ._common import protect_kwargs, restore_attr
+from ..guard import StreamRestorer
+from ._common import protect_kwargs
+from ._streams import AnthropicEventRestorer, arestore_events, restore_events, restore_message_content
 
 __all__ = ["ObfusAIAnthropic"]
+
+_PASSTHROUGH = frozenset({"count_tokens"})
+
+
+class _EventStream:
+    """Decoded view of a raw event stream (sync or async), keeping ``close``/context-manager use."""
+
+    def __init__(self, inner: Any, mapping: Mapping[str, str]) -> None:
+        self._inner = inner
+        restorer = AnthropicEventRestorer(mapping)
+        self._is_async = hasattr(inner, "__aiter__")
+        self._events: Any = (
+            arestore_events(inner, restorer) if self._is_async else restore_events(inner, restorer)
+        )
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._events)
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self._events.__aiter__()
+
+    def __enter__(self) -> "_EventStream":
+        if hasattr(self._inner, "__enter__"):
+            self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._inner.__exit__(*exc) if hasattr(self._inner, "__exit__") else None
+
+    async def __aenter__(self) -> "_EventStream":
+        if hasattr(self._inner, "__aenter__"):
+            await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._inner.__aexit__(*exc) if hasattr(self._inner, "__aexit__") else None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _RestoredMessageStream:
+    """Decoded wrapper around the SDK's ``MessageStream`` / ``AsyncMessageStream``."""
+
+    def __init__(self, inner: Any, mapping: Mapping[str, str]) -> None:
+        self._inner = inner
+        self._mapping = dict(mapping)
+
+    @property
+    def text_stream(self) -> Any:
+        source = self._inner.text_stream
+        restorer = StreamRestorer(self._mapping)
+        if hasattr(source, "__aiter__"):
+            return self._atext(source, restorer)
+        return self._text(source, restorer)
+
+    @staticmethod
+    def _text(source: Any, restorer: StreamRestorer) -> Iterator[str]:
+        for chunk in source:
+            out = restorer.feed(chunk)
+            if out:
+                yield out
+        tail = restorer.flush()
+        if tail:
+            yield tail
+
+    @staticmethod
+    async def _atext(source: Any, restorer: StreamRestorer) -> AsyncIterator[str]:
+        async for chunk in source:
+            out = restorer.feed(chunk)
+            if out:
+                yield out
+        tail = restorer.flush()
+        if tail:
+            yield tail
+
+    def get_final_message(self) -> Any:
+        result = self._inner.get_final_message()
+        if inspect.isawaitable(result):
+            return self._await_message(result)
+        restore_message_content(getattr(result, "content", None), self._mapping)
+        return result
+
+    def get_final_text(self) -> Any:
+        result = self._inner.get_final_text()
+        if inspect.isawaitable(result):
+            return self._await_text(result)
+        return ObfusAIComponent.deobfuscate(result, self._mapping)
+
+    async def _await_message(self, awaited: Any) -> Any:
+        result = await awaited
+        restore_message_content(getattr(result, "content", None), self._mapping)
+        return result
+
+    async def _await_text(self, awaited: Any) -> str:
+        return ObfusAIComponent.deobfuscate(await awaited, self._mapping)
+
+    def __iter__(self) -> Iterator[Any]:
+        raise NotImplementedError(
+            "iterate text_stream (decoded) or use messages.create(stream=True) for decoded raw events"
+        )
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        raise NotImplementedError(
+            "iterate text_stream (decoded) or use messages.create(stream=True) for decoded raw events"
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _StreamManager:
+    """Wraps the object returned by ``messages.stream(...)`` (a sync or async context manager)."""
+
+    def __init__(self, inner: Any, mapping: Mapping[str, str]) -> None:
+        self._inner = inner
+        self._mapping = mapping
+
+    def __enter__(self) -> _RestoredMessageStream:
+        return _RestoredMessageStream(self._inner.__enter__(), self._mapping)
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._inner.__exit__(*exc)
+
+    async def __aenter__(self) -> _RestoredMessageStream:
+        return _RestoredMessageStream(await self._inner.__aenter__(), self._mapping)
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._inner.__aexit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
 
 class _Messages:
@@ -37,41 +179,46 @@ class _Messages:
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
         owner = self._owner
-        if kwargs.get("stream") and owner.restore_responses:
-            raise NotImplementedError(
-                "ObfusAIAnthropic cannot restore streamed events; use restore_responses=False "
-                "with obfusai.guard.StreamRestorer"
-            )
         call_kwargs, mapping = protect_kwargs(owner.component, kwargs, "anthropic")
         result = owner.client.messages.create(*args, **call_kwargs)
         if not owner.restore_responses or not mapping:
             return result
+        stream = bool(kwargs.get("stream"))
         if inspect.isawaitable(result):
-            return self._finish_async(result, mapping)
-        return self._finish(result, mapping)
+            return self._finish_async(result, mapping, stream)
+        return self._finish(result, mapping, stream)
 
     def stream(self, *args: Any, **kwargs: Any) -> Any:
-        call_kwargs, _ = protect_kwargs(self._owner.component, kwargs, "anthropic")
-        return self._owner.client.messages.stream(*args, **call_kwargs)
+        owner = self._owner
+        call_kwargs, mapping = protect_kwargs(owner.component, kwargs, "anthropic")
+        manager = owner.client.messages.stream(*args, **call_kwargs)
+        if not owner.restore_responses or not mapping:
+            return manager
+        return _StreamManager(manager, mapping)
 
-    async def _finish_async(self, awaited: Any, mapping: Mapping[str, str]) -> Any:
-        return self._finish(await awaited, mapping)
+    async def _finish_async(self, awaited: Any, mapping: Mapping[str, str], stream: bool) -> Any:
+        return self._finish(await awaited, mapping, stream)
 
     @staticmethod
-    def _finish(result: Any, mapping: Mapping[str, str]) -> Any:
-        for block in getattr(result, "content", None) or []:
-            if getattr(block, "type", None) == "text":
-                restore_attr(block, "text", mapping)
+    def _finish(result: Any, mapping: Mapping[str, str], stream: bool) -> Any:
+        if stream:
+            return _EventStream(result, mapping)
+        restore_message_content(getattr(result, "content", None), mapping)
         return result
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._owner.client.messages, name)
+        if name in _PASSTHROUGH:
+            return getattr(self._owner.client.messages, name)
+        raise AttributeError(
+            f"messages.{name} is not protected by ObfusAIAnthropic; call it on the wrapped client "
+            "(`wrapper.client`) if sending plaintext prompts there is acceptable"
+        )
 
 
 class ObfusAIAnthropic:
-    """Proxy around an Anthropic client that protects prompts on ``messages.create``.
+    """Proxy around an Anthropic client that protects prompts on ``messages.create``/``stream``.
 
-    All other attributes are forwarded to the wrapped client.
+    All other client attributes are forwarded to the wrapped client unprotected.
 
     Args:
         client: ``Anthropic`` / ``AsyncAnthropic`` (or compatible) instance.

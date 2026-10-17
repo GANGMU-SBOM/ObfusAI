@@ -46,7 +46,7 @@ Hard stop: drawdown_limit = 8.2%.               ...decoding instructions...
 | ⚓ **Context anchoring** | A self-describing `<obfusai-context>` block tells the model how to decode silently and not to reveal the table. English or Chinese, full or compact |
 | 🎚 **Three intensities** | `low` · `medium` · `high` (wrapped aliases, reversed definitions, decoys, shuffled table) |
 | 🧩 **Whole-request protection** | System prompt + tool descriptions share one table; tool names, parameters and enums stay intact so tool calls still work |
-| 🔌 **Drop-in integrations** | OpenAI & Anthropic client wrappers (sync/async), LangChain transformer, runnable and model wrapper |
+| 🔌 **Drop-in integrations** | OpenAI (Chat Completions **and Responses API**) & Anthropic client wrappers — sync, async and **streaming** — plus LangChain transformer, runnable and model wrapper |
 | 🛡 **Leak guard** | `LeakDetector` scans model output for anchors, alias definitions, aliases and protected values — and redacts them |
 | 🌊 **Streaming restore** | `StreamRestorer` decodes aliases even when they are split across chunks |
 | 📏 **Fidelity harness** | `evaluate_fidelity` replays your test cases on plaintext vs. each level and reports pass rate, leaks and size growth |
@@ -92,6 +92,8 @@ from obfusai.adapters.openai import ObfusAIOpenAI
 
 client = ObfusAIOpenAI(OpenAI(), ObfusAIComponent("high", seed="my-secret"))
 reply = client.chat.completions.create(model="gpt-4o", messages=[...], tools=[...])   # streaming works too
+reply = client.responses.create(model="gpt-4o", instructions=SYSTEM, input="hi", tools=[...])  # Responses API
+print(reply.output_text)                                                              # decoded
 ```
 
 ```python
@@ -100,7 +102,13 @@ from obfusai.adapters.anthropic import ObfusAIAnthropic
 
 client = ObfusAIAnthropic(Anthropic(), ObfusAIComponent("medium", seed="my-secret"))
 reply = client.messages.create(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512)
+
+with client.messages.stream(model="claude-sonnet-5-5", system=SYSTEM, messages=[...], max_tokens=512) as stream:
+    for text in stream.text_stream:        # decoded, even when an alias is split across events
+        print(text, end="")
 ```
+
+> The wrappers protect `chat.completions.create`, `responses.create`, `messages.create` and `messages.stream`. Other endpoints (batches, legacy completions, …) are **not** protected: unprotected `messages.*` methods raise instead of silently sending plaintext, but other client attributes are forwarded as-is.
 
 ### LangChain
 
@@ -204,7 +212,7 @@ flowchart LR
 
 ## Roadmap
 
-OpenAI Responses API wrapper · Anthropic streaming restore · LlamaIndex adapter · per-field policies · richer PII detectors.
+LlamaIndex adapter · per-field policies · richer PII detectors · Anthropic raw-event iteration from `messages.stream()`.
 
 ## Development
 
